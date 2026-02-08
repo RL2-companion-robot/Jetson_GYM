@@ -82,38 +82,72 @@ void printUsage(const char* prog) {
  */
 bool loadCalibration(const std::string& filename, float init_pos[10]) {
     std::ifstream f(filename);
-    if (!f.is_open()) return false;
+    if (!f.is_open()) {
+        std::cerr << "无法打开标定文件: " << filename << std::endl;
+        return false;
+    }
 
     std::string line;
     int idx = 0;
+    bool in_init_pose = false;
 
     // 逐行解析YAML文件
     while (std::getline(f, line) && idx < 10) {
+        // 移除前导空白
+        size_t start = line.find_first_not_of(" \t");
+        if (start == std::string::npos) continue;
+
+        std::string trimmed = line.substr(start);
+
+        // 检查是否进入init_pose部分
+        if (trimmed.find("init_pose:") != std::string::npos) {
+            in_init_pose = true;
+            continue;
+        }
+
+        // 如果遇到其他顶级配置项，退出init_pose部分
+        if (in_init_pose && trimmed[0] != ' ' && trimmed[0] != '\t' &&
+            trimmed.find("init_pose:") == std::string::npos) {
+            break;
+        }
+
+        if (!in_init_pose) continue;
+
         // 查找冒号分隔符
-        size_t pos = line.find(':');
+        size_t pos = trimmed.find(':');
         if (pos == std::string::npos) continue;
 
         // 提取冒号后的值
-        std::string val = line.substr(pos + 1);
+        std::string val = trimmed.substr(pos + 1);
 
         // 移除注释部分
         size_t comment = val.find('#');
         if (comment != std::string::npos) val = val.substr(0, comment);
 
         // 跳过前导空白
-        size_t start = val.find_first_not_of(" \t");
-        if (start == std::string::npos) continue;
+        size_t val_start = val.find_first_not_of(" \t");
+        if (val_start == std::string::npos) continue;
 
         // 尝试解析为浮点数
         try {
-            init_pos[idx++] = std::stof(val.substr(start));
+            float value = std::stof(val.substr(val_start));
+            init_pos[idx++] = value;
+            std::cout << "  [" << idx << "] " << value << std::endl;
         } catch (...) {
             // 解析失败，跳过此行
         }
     }
 
+    f.close();
+
     // 必须成功读取10个值
-    return idx == 10;
+    if (idx == 10) {
+        std::cout << "成功读取10个标定值" << std::endl;
+        return true;
+    } else {
+        std::cerr << "标定文件格式错误，只读取到 " << idx << " 个值，需要10个" << std::endl;
+        return false;
+    }
 }
 
 /**
