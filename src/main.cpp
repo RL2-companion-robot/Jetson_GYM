@@ -497,7 +497,7 @@ int main(int argc, char** argv) {
 
     // 导出推理数据到CSV文件
     if (!g_inference_records.empty()) {
-        exportInferenceDataToCSV("inference_data.csv");
+        exportInferenceDataToCSV("../data/inference_data.csv");
     } else {
         std::cout << "没有推理数据可导出" << std::endl;
     }
