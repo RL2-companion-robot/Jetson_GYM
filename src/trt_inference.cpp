@@ -240,9 +240,9 @@ void TRTInference::buildObservation(const MsgRequest& request, float* obs) {
     // cmd_x_ = cmd_x_ * (1 - SMOOTH) + applyDeadzone(request.command[0], DEAD_ZONE) * SMOOTH;
     // cmd_y_ = cmd_y_ * (1 - SMOOTH) + applyDeadzone(request.command[1], DEAD_ZONE) * SMOOTH;
     // cmd_rate_ = cmd_rate_ * (1 - SMOOTH) + applyDeadzone(request.command[2], DEAD_ZONE) * SMOOTH;
-    cmd_x_ = cmd_x_ * (1 - SMOOTH) + applyDeadzone(0.01f, DEAD_ZONE) * SMOOTH;
-    cmd_y_ = cmd_y_ * (1 - SMOOTH) + applyDeadzone(0.01f, DEAD_ZONE) * SMOOTH;
-    cmd_rate_ = cmd_rate_ * (1 - SMOOTH) + applyDeadzone(0.01f, DEAD_ZONE) * SMOOTH;
+    cmd_x_ = cmd_x_ * (1 - SMOOTH) + applyDeadzone(0.0f, DEAD_ZONE) * SMOOTH;
+    cmd_y_ = cmd_y_ * (1 - SMOOTH) + applyDeadzone(0.0f, DEAD_ZONE) * SMOOTH;
+    cmd_rate_ = cmd_rate_ * (1 - SMOOTH) + applyDeadzone(0.0f, DEAD_ZONE) * SMOOTH;
     obs[idx++] = cmd_x_ * LIN_VEL_SCALE;      // 前进速度指令
     obs[idx++] = cmd_y_ * LIN_VEL_SCALE;      // 侧移速度指令
     obs[idx++] = cmd_rate_ * ANG_VEL_SCALE;   // 转向速度指令
