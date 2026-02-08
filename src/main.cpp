@@ -105,9 +105,9 @@ bool loadCalibration(const std::string& filename, float init_pos[10]) {
             continue;
         }
 
-        // 如果遇到其他顶级配置项，退出init_pose部分
-        if (in_init_pose && trimmed[0] != ' ' && trimmed[0] != '\t' &&
-            trimmed.find("init_pose:") == std::string::npos) {
+        // 如果遇到robot_config:之外的顶级配置项，退出
+        if (in_init_pose && start == 0 && trimmed.find("init_pose:") == std::string::npos &&
+            trimmed.find("robot_config:") == std::string::npos) {
             break;
         }
 
@@ -116,6 +116,15 @@ bool loadCalibration(const std::string& filename, float init_pos[10]) {
         // 查找冒号分隔符
         size_t pos = trimmed.find(':');
         if (pos == std::string::npos) continue;
+
+        // 检查是否是配置项（如left_leg:, right_leg:等）
+        std::string key = trimmed.substr(0, pos);
+        key.erase(key.find_last_not_of(" \t") + 1);  // 移除尾部空白
+
+        // 跳过配置项标签（left_leg:, right_leg:等）
+        if (key == "left_leg" || key == "right_leg" || key == "robot_config") {
+            continue;
+        }
 
         // 提取冒号后的值
         std::string val = trimmed.substr(pos + 1);
@@ -131,8 +140,9 @@ bool loadCalibration(const std::string& filename, float init_pos[10]) {
         // 尝试解析为浮点数
         try {
             float value = std::stof(val.substr(val_start));
-            init_pos[idx++] = value;
-            std::cout << "  [" << idx << "] " << value << std::endl;
+            init_pos[idx] = value;
+            std::cout << "  [" << (idx + 1) << "] " << key << " = " << value << std::endl;
+            idx++;
         } catch (...) {
             // 解析失败，跳过此行
         }
