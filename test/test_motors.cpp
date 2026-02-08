@@ -288,7 +288,7 @@ int main(int argc, char** argv) {
     cout << "Request消息大小: " << sizeof(MsgRequest) << " bytes" << endl;
     cout << "Response消息大小: " << sizeof(MsgResponse) << " bytes" << endl;
     cout << "========================================" << endl;
-    cout << "正弦参数: 幅值=1.57rad (约90°), 周期=10秒" << endl;
+    cout << "正弦参数: 幅值=0.09rad (约5°), 周期=10秒" << endl;
     cout << "说明: 正弦波 + 初始位置 = 电机目标位置" << endl;
     cout << "========================================" << endl;
     cout << "开始完整数据流测试，按Ctrl+C退出" << endl;
@@ -296,7 +296,7 @@ int main(int argc, char** argv) {
     cout << "========================================" << endl;
 
     // ========== 正弦波参数 ==========
-    const float amplitude = 1.57f;              // 幅值 1.57 rad (约90度)
+    const float amplitude = 0.09f;              // 幅值 0.09 rad (约5度)
     const float period = 10.0f;                 // 周期 10秒
     const float omega = 2.0f * M_PI / period;   // 角频率
 
