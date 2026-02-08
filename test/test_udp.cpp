@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
     signal(SIGTERM, signal_handler);
 
     // 解析命令行参数
-    string ip = (argc >= 2) ? argv[1] : "192.168.137.4";
+    string ip = (argc >= 2) ? argv[1] : "192.168.5.159";
     int port = (argc >= 3) ? atoi(argv[2]) : 10000;
 
     // 打印测试信息
