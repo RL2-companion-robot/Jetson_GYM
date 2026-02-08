@@ -25,6 +25,8 @@
 #include <csignal>
 #include <cmath>
 #include <unistd.h>
+#include <chrono>
+#include <vector>
 
 /*
  * ============================================================
@@ -35,6 +37,15 @@
 /// 运行标志，用于控制主循环
 /// 当收到SIGINT或SIGTERM信号时设为false
 volatile bool g_running = true;
+
+/// 推理数据记录结构
+struct InferenceRecord {
+    double timestamp;  // 时间戳（秒）
+    float action[10];  // 10个电机的action值
+};
+
+/// 全局推理数据记录容器
+std::vector<InferenceRecord> g_inference_records;
 
 /**
  * @brief 信号处理函数
@@ -47,6 +58,38 @@ volatile bool g_running = true;
 void signalHandler(int sig) {
     std::cout << "\n收到信号 " << sig << ", 正在关闭..." << std::endl;
     g_running = false;
+}
+
+/**
+ * @brief 将推理数据导出为CSV文件
+ *
+ * @param filename CSV文件路径
+ */
+void exportInferenceDataToCSV(const std::string& filename) {
+    std::ofstream csv(filename);
+    if (!csv.is_open()) {
+        std::cerr << "无法创建CSV文件: " << filename << std::endl;
+        return;
+    }
+
+    // 写入CSV头
+    csv << "timestamp(s)";
+    for (int i = 0; i < 10; i++) {
+        csv << ",action_" << i;
+    }
+    csv << "\n";
+
+    // 写入数据行
+    for (const auto& record : g_inference_records) {
+        csv << std::fixed << std::setprecision(6) << record.timestamp;
+        for (int i = 0; i < 10; i++) {
+            csv << "," << record.action[i];
+        }
+        csv << "\n";
+    }
+
+    csv.close();
+    std::cout << "推理数据已导出到: " << filename << " (" << g_inference_records.size() << " 条记录)" << std::endl;
 }
 
 /**
@@ -324,6 +367,9 @@ int main(int argc, char** argv) {
     int infer_count = 0;  // 推理计数
     float last_action[ACTION_DIM] = {0};  // 上一步的action，用于滤波
 
+    // 记录程序启动时间
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     // ========== 主控制循环 ==========
     while (g_running) {
         // 发送上一次的响应
@@ -365,6 +411,16 @@ int main(int argc, char** argv) {
                     last_action[i] = action[i];  // 保存原始action用于下一次滤波
                 }
                 infer_count++;
+
+                // 记录推理数据
+                auto current_time = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double> elapsed = current_time - start_time;
+                InferenceRecord record;
+                record.timestamp = elapsed.count();
+                for (int i = 0; i < ACTION_DIM; ++i) {
+                    record.action[i] = response.q_exp[i];
+                }
+                g_inference_records.push_back(record);
 
                 // 每0.5秒打印一次状态（250次 × 2ms = 500ms）
                 if (infer_count % 250 == 0) {
@@ -438,6 +494,13 @@ int main(int argc, char** argv) {
     std::cout << "总循环次数: " << loop_count << std::endl;
     std::cout << "总推理次数: " << infer_count << std::endl;
     std::cout << "========================================" << std::endl;
+
+    // 导出推理数据到CSV文件
+    if (!g_inference_records.empty()) {
+        exportInferenceDataToCSV("inference_data.csv");
+    } else {
+        std::cout << "没有推理数据可导出" << std::endl;
+    }
 
     return 0;
 }
