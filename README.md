@@ -8,7 +8,7 @@
 - 🚀 **高性能推理**：TensorRT 引擎实现 0.15ms 推理延迟（6666 FPS）
 - 🤖 **实时控制**：500Hz 控制循环，支持双足机器人运动
 - 📊 **数据记录**：自动记录推理数据并导出为 CSV 文件
-- 🎮 **手柄支持**：支持游戏手柄输入（通过 `/dev/input/event*` 接口）
+- 🎮 **手柄支持**：支持游戏手柄输入（通过 `/dev/input/js0` 接口）
 - ⚙️ **灵活配置**：YAML 格式的机器人标定文件
 
 **系统架构**：
@@ -109,10 +109,13 @@ project/
 ### 5. 手柄输入工具 (Gamepad Calibration) - 新增
 **文件**: `test/gamepad_calibration.cpp`
 
-- 读取 `/dev/input/event*` 设备事件
+- 读取 `/dev/input/js0` joystick 设备事件
 - 实时显示摇杆轴值和按钮键码
-- 支持自动设备扫描
+- 支持映射后的速度命令显示
 - 非阻塞事件读取
+- 映射方案 A：左摇杆前后→`vx`，左摇杆左右→`vy`，右摇杆左右→`yaw_rate`
+- 速度限制：`vx/vy` 最大 `0.2 m/s`，`yaw_rate` 最大 `0.4 rad/s`
+- `LT` 按钮用于恢复到 `init_pose`
 
 ## 数据流说明
 
@@ -258,7 +261,7 @@ cd build
 ### 4. 手柄键码获取
 
 ```bash
-./gamepad_calibration /dev/input/event2
+./gamepad_calibration /dev/input/js0
 ```
 
 ## 常见问题

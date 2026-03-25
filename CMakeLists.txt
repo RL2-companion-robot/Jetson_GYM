@@ -35,12 +35,14 @@ set(SOURCES
     src/main.cpp
     src/communication.cpp
     src/trt_inference.cpp
+    src/gamepad_input.cpp
 )
 
 set(HEADERS
     include/communication.h
     include/trt_inference.h
     include/types.h
+    include/gamepad_input.h
 )
 
 add_executable(${PROJECT_NAME} ${SOURCES} ${HEADERS})

@@ -18,6 +18,7 @@
 
 #include "communication.h"
 #include "trt_inference.h"
+#include "gamepad_input.h"
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -347,6 +348,14 @@ int main(int argc, char** argv) {
     inference.setInitPose(calibrated_init_pos);
     moveToInitPose(udp, calibrated_init_pos);
 
+    // ========== 初始化手柄输入 ==========
+    GamepadInput gamepad;
+    if (gamepad.init("/dev/input/js0")) {
+        std::cout << "手柄已连接，启用手柄控制: /dev/input/js0" << std::endl;
+    } else {
+        std::cout << "手柄未连接，继续使用 UDP command" << std::endl;
+    }
+
     // ========== 开始控制循环 ==========
     std::cout << "========================================" << std::endl;
     std::cout << "开始控制循环 (500Hz)..." << std::endl;
@@ -372,11 +381,36 @@ int main(int argc, char** argv) {
 
     // ========== 主控制循环 ==========
     while (g_running) {
+        gamepad.update();
+
+        if (gamepad.consumeLTPressedEdge()) {
+            std::cout << "\n[手柄] LT按下，恢复到初始姿态" << std::endl;
+            inference.reset();
+            std::fill(last_action, last_action + ACTION_DIM, 0.0f);
+            std::memset(&response, 0, sizeof(response));
+            for (int i = 0; i < ACTION_DIM; ++i) {
+                response.q_exp[i] = calibrated_init_pos[i];
+            }
+            moveToInitPose(udp, calibrated_init_pos);
+            continue;
+        }
+
         // 发送上一次的响应
         udp.sendResponse(response);
 
         // 接收新的请求
         if (udp.receiveRequest(request)) {
+            if (gamepad.isConnected()) {
+                float vx = 0.0f;
+                float vy = 0.0f;
+                float yaw_rate = 0.0f;
+                gamepad.getCommand(vx, vy, yaw_rate);
+                request.command[0] = vx;
+                request.command[1] = vy;
+                request.command[2] = yaw_rate;
+                request.command[3] = 0.0f;
+            }
+
             float action[ACTION_DIM];
 
             // 执行推理
@@ -501,6 +535,8 @@ int main(int argc, char** argv) {
     } else {
         std::cout << "没有推理数据可导出" << std::endl;
     }
+
+    gamepad.close();
 
     return 0;
 }

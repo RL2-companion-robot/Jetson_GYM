@@ -1,133 +1,128 @@
 /**
  * @file gamepad_calibration.cpp
- * @brief 交互式手柄键码获取工具
- * @details 用于获取当前手柄的轴值和按钮键码映射
+ * @brief 基于 joystick 接口的手柄调试工具
+ * @details 读取 /dev/input/js0，显示轴值、按钮值以及映射后的速度命令
  *
- * 编译: g++ -o gamepad_calibration gamepad_calibration.cpp
  * 运行: ./gamepad_calibration [device_path]
- * 例如: ./gamepad_calibration /dev/input/event2
+ * 例如: ./gamepad_calibration /dev/input/js0
  */
 
 #include <iostream>
+#include <iomanip>
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
-#include <linux/input.h>
-#include <iomanip>
-#include <map>
-#include <errno.h>
+#include <cerrno>
+#include <cmath>
+#include <linux/joystick.h>
 #include <sys/stat.h>
-#include <dirent.h>
+
+namespace {
+constexpr int AXIS_COUNT = 8;
+constexpr int BUTTON_COUNT = 16;
+constexpr int LEFT_X_AXIS_ID = 0;
+constexpr int LEFT_Y_AXIS_ID = 1;
+constexpr int RIGHT_X_AXIS_ID = 2;
+constexpr int LT_BUTTON_ID = 8;
+constexpr float AXIS_MAX_RAW = 32767.0f;
+constexpr float DEADZONE = 0.10f;
+constexpr float MAX_VX = 0.2f;
+constexpr float MAX_VY = 0.2f;
+constexpr float MAX_YAW_RATE = 0.4f;
+
+float normalizeAxis(int raw) {
+    float v = static_cast<float>(raw) / AXIS_MAX_RAW;
+    if (v > 1.0f) v = 1.0f;
+    if (v < -1.0f) v = -1.0f;
+    return v;
+}
+
+float applyDeadzone(float value) {
+    return std::fabs(value) < DEADZONE ? 0.0f : value;
+}
+}
 
 int main(int argc, char* argv[]) {
-    const char* device = "/dev/input/event2";
-
+    const char* device = "/dev/input/js0";
     if (argc > 1) {
         device = argv[1];
     }
 
     std::cout << "========================================" << std::endl;
-    std::cout << "  手柄键码获取工具" << std::endl;
+    std::cout << "  手柄调试工具 (joystick/js0)" << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << "\n尝试打开设备: " << device << std::endl;
 
-    // 检查设备文件是否存在
     struct stat st;
     if (stat(device, &st) < 0) {
         std::cerr << "设备文件不存在: " << device << std::endl;
-        std::cerr << "\n可用的输入设备:" << std::endl;
-        DIR* dir = opendir("/dev/input");
-        if (dir) {
-            struct dirent* entry;
-            while ((entry = readdir(dir)) != nullptr) {
-                if (strncmp(entry->d_name, "event", 5) == 0) {
-                    std::cerr << "  /dev/input/" << entry->d_name << std::endl;
-                }
-            }
-            closedir(dir);
-        }
         return 1;
     }
 
     int fd = open(device, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
         std::cerr << "无法打开设备: " << device << std::endl;
-        std::cerr << "错误: " << strerror(errno) << std::endl;
+        std::cerr << "错误: " << std::strerror(errno) << std::endl;
         return 1;
     }
 
+    int axis_values[AXIS_COUNT] = {0};
+    int button_values[BUTTON_COUNT] = {0};
+
     std::cout << "设备已打开成功！" << std::endl;
-    std::cout << "\n请按照以下顺序操作手柄，记录对应的键码值：" << std::endl;
-    std::cout << "1. 左摇杆 - 向左/右/上/下推动" << std::endl;
-    std::cout << "2. 右摇杆 - 向左/右/上/下推动" << std::endl;
-    std::cout << "3. 按钮 - 按下各个按钮" << std::endl;
-    std::cout << "4. 肩键 - 按下LT/RT" << std::endl;
+    std::cout << "\n映射方案A：" << std::endl;
+    std::cout << "  左摇杆前后 -> vx (±0.2 m/s)" << std::endl;
+    std::cout << "  左摇杆左右 -> vy (±0.2 m/s)" << std::endl;
+    std::cout << "  右摇杆左右 -> yaw_rate (±0.4 rad/s)" << std::endl;
+    std::cout << "  LT按钮号 -> " << LT_BUTTON_ID << std::endl;
     std::cout << "\n按 Ctrl+C 退出\n" << std::endl;
 
-    struct input_event event;
-    std::map<int, int> axis_values;
-    std::map<int, int> button_values;
-
-    std::cout << std::string(80, '-') << std::endl;
-    std::cout << "实时数据显示：" << std::endl;
-    std::cout << std::string(80, '-') << std::endl;
-
     int event_count = 0;
-    int empty_reads = 0;
-
     while (true) {
+        js_event event;
         ssize_t bytes = read(fd, &event, sizeof(event));
 
         if (bytes == sizeof(event)) {
+            unsigned char event_type = event.type & ~JS_EVENT_INIT;
             event_count++;
-            empty_reads = 0;
 
-            // 处理轴事件 (EV_ABS)
-            if (event.type == EV_ABS) {
-                axis_values[event.code] = event.value;
+            if (event_type == JS_EVENT_AXIS && event.number < AXIS_COUNT) {
+                axis_values[event.number] = event.value;
 
-                std::cout << "[轴事件 #" << event_count << "] 轴码: " << std::setw(3) << event.code
-                          << " (0x" << std::hex << std::setw(2) << std::setfill('0') << event.code << std::dec << std::setfill(' ') << ")"
+                float left_x = applyDeadzone(normalizeAxis(axis_values[LEFT_X_AXIS_ID]));
+                float left_y = applyDeadzone(normalizeAxis(axis_values[LEFT_Y_AXIS_ID]));
+                float right_x = applyDeadzone(normalizeAxis(axis_values[RIGHT_X_AXIS_ID]));
+
+                float vx = -left_y * MAX_VX;
+                float vy = left_x * MAX_VY;
+                float yaw_rate = right_x * MAX_YAW_RATE;
+
+                std::cout << "[轴事件 #" << event_count << "] 轴号: " << std::setw(2) << static_cast<int>(event.number)
                           << " | 值: " << std::setw(6) << event.value
                           << " | 归一化: " << std::fixed << std::setprecision(3)
-                          << (event.value / 32768.0f) << std::endl;
-                std::cout.flush();
-            }
-            // 处理按钮事件 (EV_KEY)
-            else if (event.type == EV_KEY) {
-                button_values[event.code] = event.value;
-
-                std::cout << "[按钮事件 #" << event_count << "] 按钮码: " << std::setw(3) << event.code
-                          << " (0x" << std::hex << std::setw(2) << std::setfill('0') << event.code << std::dec << std::setfill(' ') << ")"
-                          << " | 状态: " << (event.value ? "按下" : "释放") << std::endl;
-                std::cout.flush();
-            }
-            // 处理同步事件 (EV_SYN)
-            else if (event.type == EV_SYN) {
-                // 忽略同步事件
-            }
-            else {
-                std::cout << "[其他事件 #" << event_count << "] 类型: " << event.type
-                          << " | 码: " << event.code
-                          << " | 值: " << event.value << std::endl;
+                          << normalizeAxis(event.value)
+                          << " | vx=" << vx
+                          << " vy=" << vy
+                          << " yaw=" << yaw_rate << std::endl;
+            } else if (event_type == JS_EVENT_BUTTON && event.number < BUTTON_COUNT) {
+                button_values[event.number] = event.value;
+                std::cout << "[按钮事件 #" << event_count << "] 按钮号: " << std::setw(2) << static_cast<int>(event.number)
+                          << " | 状态: " << (event.value ? "按下" : "释放");
+                if (event.number == LT_BUTTON_ID && event.value) {
+                    std::cout << " | LT触发";
+                }
+                std::cout << std::endl;
             }
         } else if (bytes < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                empty_reads++;
-                if (empty_reads == 1) {
-                    std::cerr << "警告: 设备没有发送事件，请检查手柄是否连接或是否为正确的设备" << std::endl;
-                }
-                if (empty_reads > 100) {
-                    std::cerr << "设备无响应，退出" << std::endl;
-                    break;
-                }
-                usleep(100000);  // 100ms
-            } else if (errno == EINTR) {
+                usleep(10000);
                 continue;
-            } else {
-                std::cerr << "读取错误: " << strerror(errno) << std::endl;
-                break;
             }
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "读取错误: " << std::strerror(errno) << std::endl;
+            break;
         } else if (bytes == 0) {
             std::cerr << "设备已关闭" << std::endl;
             break;
