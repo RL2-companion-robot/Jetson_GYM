@@ -82,6 +82,9 @@ target_include_directories(test_motors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 add_executable(test_init_pose test/test_init_pose.cpp)
 target_include_directories(test_init_pose PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+add_executable(test_zero_pose test/test_zero_pose.cpp)
+target_include_directories(test_zero_pose PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 add_executable(test_capture_init_pose_observation test/test_capture_init_pose_observation.cpp)
 target_include_directories(test_capture_init_pose_observation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
