@@ -41,6 +41,7 @@ using namespace std;
  * ============================================================
  */
 
+#pragma pack(push, 1)
 struct MsgRequest {
     float trigger;
     float command[4];
@@ -51,6 +52,7 @@ struct MsgRequest {
     float dq[10];
     float tau[10];
     float init_pos[10];
+    float quat[4];
 };
 
 struct MsgResponse {
@@ -58,6 +60,10 @@ struct MsgResponse {
     float dq_exp[10];
     float tau_exp[10];
 };
+#pragma pack(pop)
+
+static_assert(sizeof(MsgRequest) == 58 * sizeof(float), "MsgRequest size must be 232 bytes");
+static_assert(sizeof(MsgResponse) == 30 * sizeof(float), "MsgResponse size must be 120 bytes");
 
 /*
  * ============================================================
@@ -198,7 +204,7 @@ float calibrate_joint(int joint_id, int sock_fd, struct sockaddr_in& addr, sockl
         char buf[512];
         int n = recvfrom(sock_fd, buf, sizeof(buf), 0, (struct sockaddr*)&addr, &addr_len);
 
-        if (n > 0) {
+        if (n == static_cast<int>(sizeof(request))) {
             memcpy(&request, buf, sizeof(request));
             current_angle = request.q[joint_id];
 
@@ -235,6 +241,9 @@ float calibrate_joint(int joint_id, int sock_fd, struct sockaddr_in& addr, sockl
                      << (current_angle * 180.0 / M_PI) << " deg)   " << flush;
             }
             update_count++;
+        } else if (n > 0) {
+            cout << "\n[警告] 收到异常长度数据包: " << n
+                 << " bytes，期望 " << sizeof(request) << " bytes" << endl;
         }
 
         // 检查键盘输入（使用select实现非阻塞）
@@ -369,9 +378,13 @@ int main(int argc, char** argv) {
         sendto(sock_fd, &dummy, sizeof(dummy), 0, (struct sockaddr*)&remote_addr, addr_len);
 
         char buf[512];
-        if (recvfrom(sock_fd, buf, sizeof(buf), 0, (struct sockaddr*)&remote_addr, &addr_len) > 0) {
+        int received = recvfrom(sock_fd, buf, sizeof(buf), 0, (struct sockaddr*)&remote_addr, &addr_len);
+        if (received == static_cast<int>(sizeof(MsgRequest))) {
             connected = true;
             cout << "✓ 已连接到ODroid，开始标定..." << endl;
+        } else if (received > 0) {
+            cout << "[警告] 收到异常长度数据包: " << received
+                 << " bytes，期望 " << sizeof(MsgRequest) << " bytes" << endl;
         }
         usleep(100000);
     }

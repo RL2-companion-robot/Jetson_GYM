@@ -16,18 +16,24 @@
  *       ./JetsonRLDeploy <engine_path> [--ip IP] [--port PORT] [--config FILE]
  */
 
+#include "csv_logger.h"
 #include "communication.h"
 #include "trt_inference.h"
 #include "gamepad_input.h"
 #include <iostream>
 #include <iomanip>
-#include <fstream>
 #include <cstring>
 #include <csignal>
 #include <cmath>
+#include <ctime>
 #include <unistd.h>
 #include <chrono>
-#include <vector>
+#include <array>
+#include <cerrno>
+#include <sstream>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <utility>
 
 /*
  * ============================================================
@@ -39,14 +45,9 @@
 /// 当收到SIGINT或SIGTERM信号时设为false
 volatile bool g_running = true;
 
-/// 推理数据记录结构
-struct InferenceRecord {
-    double timestamp;  // 时间戳（秒）
-    float action[10];  // 10个电机的action值
-};
-
-/// 全局推理数据记录容器
-std::vector<InferenceRecord> g_inference_records;
+constexpr float kFilteredActionLimit = 1.57f;
+constexpr float kMotorCmdSafetyLimit = 1.57f;
+constexpr float kTorqueFeedbackLimitNm = 1.5f;
 
 /**
  * @brief 信号处理函数
@@ -61,36 +62,33 @@ void signalHandler(int sig) {
     g_running = false;
 }
 
-/**
- * @brief 将推理数据导出为CSV文件
- *
- * @param filename CSV文件路径
- */
-void exportInferenceDataToCSV(const std::string& filename) {
-    std::ofstream csv(filename);
-    if (!csv.is_open()) {
-        std::cerr << "无法创建CSV文件: " << filename << std::endl;
-        return;
+bool ensureDirectoryExists(const std::string& path) {
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0) {
+        return S_ISDIR(st.st_mode);
     }
 
-    // 写入CSV头
-    csv << "timestamp(s)";
-    for (int i = 0; i < 10; i++) {
-        csv << ",action_" << i;
-    }
-    csv << "\n";
-
-    // 写入数据行
-    for (const auto& record : g_inference_records) {
-        csv << std::fixed << std::setprecision(6) << record.timestamp;
-        for (int i = 0; i < 10; i++) {
-            csv << "," << record.action[i];
-        }
-        csv << "\n";
+    if (mkdir(path.c_str(), 0775) == 0) {
+        return true;
     }
 
-    csv.close();
-    std::cout << "推理数据已导出到: " << filename << " (" << g_inference_records.size() << " 条记录)" << std::endl;
+    if (errno == EEXIST) {
+        return true;
+    }
+
+    std::cerr << "无法创建目录: " << path << std::endl;
+    return false;
+}
+
+std::string buildCsvLogPath() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_tm;
+    localtime_r(&now_time, &local_tm);
+
+    std::ostringstream oss;
+    oss << "data/deploy_log_" << std::put_time(&local_tm, "%Y-%m-%d_%H-%M-%S") << ".csv";
+    return oss.str();
 }
 
 /**
@@ -215,10 +213,10 @@ bool loadCalibration(const std::string& filename, float init_pos[10]) {
  *
  * @param udp UDP通信对象
  * @param init_pos 目标初始姿态（10个关节）
- * @param steps 插值步数（默认500步，约1秒）
  */
-void moveToInitPose(UDPCommunication& udp, const float init_pos[10], int steps = 500) {
+void moveToInitPose(UDPCommunication& udp, const float init_pos[10]) {
     std::cout << "正在移动到标定的初始姿态..." << std::endl;
+    constexpr uint64_t kInterpolationDurationUs = 5000000ULL;  // 固定5秒插值
 
     MsgRequest request;
     MsgResponse response;
@@ -243,25 +241,47 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10], int steps =
     }
 
     if (!got_feedback) {
-        std::cout << "未收到反馈，使用零位作为起点" << std::endl;
+        std::cout << "未收到反馈，使用 init_pose 作为插值起点" << std::endl;
+        for (int i = 0; i < 10; i++) {
+            current_pos[i] = init_pos[i];
+        }
     }
 
-    // ========== 步骤2: 线性插值移动 ==========
-    for (int step = 0; step <= steps && g_running; step++) {
-        // 计算插值系数 (0.0 -> 1.0)
-        float alpha = (float)step / steps;
+    std::cout << "用5秒时间平滑插值到初始姿态..." << std::endl;
+
+    // ========== 步骤2: 固定5秒线性插值移动 ==========
+    auto interp_start = std::chrono::steady_clock::now();
+    while (g_running) {
+        auto now = std::chrono::steady_clock::now();
+        uint64_t elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(now - interp_start).count();
+
+        float alpha = static_cast<float>(elapsed_us) / static_cast<float>(kInterpolationDurationUs);
+        if (alpha > 1.0f) alpha = 1.0f;
 
         // 计算插值位置
         for (int i = 0; i < 10; i++) {
             response.q_exp[i] = current_pos[i] + alpha * (init_pos[i] - current_pos[i]);
+            response.dq_exp[i] = 0.0f;
+            response.tau_exp[i] = 0.0f;
         }
 
         // 发送位置指令
         udp.sendResponse(response);
         udp.receiveRequest(request);
 
+        if (elapsed_us >= kInterpolationDurationUs) {
+            break;
+        }
+
         usleep(2000);  // 2ms，500Hz
     }
+
+    for (int i = 0; i < 10; i++) {
+        response.q_exp[i] = init_pos[i];
+        response.dq_exp[i] = 0.0f;
+        response.tau_exp[i] = 0.0f;
+    }
+    udp.sendResponse(response);
 
     std::cout << "已到达初始姿态" << std::endl;
 }
@@ -344,6 +364,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!ensureDirectoryExists("data")) {
+        return 1;
+    }
+
+    AsyncCsvLogger csv_logger;
+    const std::string csv_log_path = buildCsvLogPath();
+    if (!csv_logger.start(csv_log_path, std::chrono::milliseconds(500))) {
+        std::cerr << "无法启动CSV日志记录器: " << csv_log_path << std::endl;
+        return 1;
+    }
+    std::cout << "CSV复盘日志: " << csv_log_path << std::endl;
+
     // ========== 设置初始姿态并移动 ==========
     inference.setInitPose(calibrated_init_pos);
     moveToInitPose(udp, calibrated_init_pos);
@@ -375,16 +407,85 @@ int main(int argc, char** argv) {
     int loop_count = 0;   // 循环计数
     int infer_count = 0;  // 推理计数
     float last_action[ACTION_DIM] = {0};  // 上一步的action，用于滤波
+    CsvLogRecord last_complete_record;
+    bool has_last_complete_record = false;
 
-    // 记录程序启动时间
-    auto start_time = std::chrono::high_resolution_clock::now();
+    auto buildRecordFromState = [&](const MsgRequest* req,
+                                    const MsgResponse* resp,
+                                    const std::string& record_type,
+                                    const std::string& event_type,
+                                    const std::string& event_msg) {
+        CsvLogRecord record;
+        record.timestamp = std::chrono::system_clock::now();
+        record.record_type = record_type;
+        record.event_type = event_type;
+        record.event_msg = event_msg;
+
+        if (resp != nullptr) {
+            for (int i = 0; i < ACTION_DIM; ++i) {
+                record.q_exp[i] = resp->q_exp[i];
+                record.dq_exp[i] = resp->dq_exp[i];
+                record.tau_exp[i] = resp->tau_exp[i];
+            }
+        }
+
+        if (req != nullptr) {
+            for (int i = 0; i < ACTION_DIM; ++i) {
+                record.q[i] = req->q[i];
+                record.dq[i] = req->dq[i];
+                record.tau[i] = req->tau[i];
+            }
+            for (int i = 0; i < 3; ++i) {
+                record.omega[i] = req->omega[i];
+                record.acc[i] = req->acc[i];
+                record.eu_ang[i] = req->eu_ang[i];
+            }
+            for (int i = 0; i < 4; ++i) {
+                record.quat[i] = req->quat[i];
+            }
+        }
+
+        return record;
+    };
+
+    auto enqueueEventRecord = [&](const std::string& event_type,
+                                  const std::string& event_msg,
+                                  const MsgRequest* req,
+                                  const MsgResponse* resp) {
+        CsvLogRecord record;
+        if (has_last_complete_record) {
+            record = last_complete_record;
+            record.timestamp = std::chrono::system_clock::now();
+            record.record_type = "event";
+            record.event_type = event_type;
+            record.event_msg = event_msg;
+        } else {
+            record = buildRecordFromState(req, resp, "event", event_type, event_msg);
+        }
+        csv_logger.enqueue(std::move(record));
+    };
 
     // ========== 主控制循环 ==========
     while (g_running) {
         gamepad.update();
 
+        auto resetToInitPose = [&](const std::string& reason) {
+            std::cout << "\n[安全保护] " << reason << std::endl;
+            std::cout << "正在回到初始姿态..." << std::endl;
+            inference.reset();
+            std::fill(last_action, last_action + ACTION_DIM, 0.0f);
+            std::memset(&response, 0, sizeof(response));
+            for (int i = 0; i < ACTION_DIM; ++i) {
+                response.q_exp[i] = calibrated_init_pos[i];
+            }
+            moveToInitPose(udp, calibrated_init_pos);
+            std::cout << "已回到初始姿态，重新开始控制循环" << std::endl;
+            std::cout << "========================================" << std::endl;
+        };
+
         if (gamepad.consumeLTPressedEdge()) {
             std::cout << "\n[手柄] LT按下，恢复到初始姿态" << std::endl;
+            enqueueEventRecord("lt_reset", "手柄LT按下，触发回到初始姿态", nullptr, &response);
             inference.reset();
             std::fill(last_action, last_action + ACTION_DIM, 0.0f);
             std::memset(&response, 0, sizeof(response));
@@ -411,6 +512,34 @@ int main(int argc, char** argv) {
                 request.command[3] = 0.0f;
             }
 
+            bool torque_over_limit = false;
+            int torque_over_limit_joint = -1;
+            float torque_over_limit_value = 0.0f;
+            for (int i = 0; i < ACTION_DIM; ++i) {
+                float abs_tau = std::fabs(request.tau[i]);
+                if (abs_tau > kTorqueFeedbackLimitNm) {
+                    torque_over_limit = true;
+                    torque_over_limit_joint = i;
+                    torque_over_limit_value = request.tau[i];
+                    break;
+                }
+            }
+
+            if (torque_over_limit) {
+                enqueueEventRecord(
+                    "torque_over_limit",
+                    "关节力矩超限，joint[" + std::to_string(torque_over_limit_joint) +
+                    "] = " + std::to_string(torque_over_limit_value) +
+                    " Nm，阈值 = " + std::to_string(kTorqueFeedbackLimitNm) + " Nm",
+                    &request,
+                    &response);
+                resetToInitPose(
+                    "关节力矩超限，joint[" + std::to_string(torque_over_limit_joint) +
+                    "] = " + std::to_string(torque_over_limit_value) +
+                    " Nm，阈值 = " + std::to_string(kTorqueFeedbackLimitNm) + " Nm");
+                continue;
+            }
+
             float action[ACTION_DIM];
 
             // 执行推理
@@ -430,31 +559,54 @@ int main(int argc, char** argv) {
             // ========== 推理失败、trigger!=1.0或输出有NaN时的处理 ==========
             if (infer_success && !has_nan) {
                 // 推理成功且无NaN，使用推理结果
+                bool motor_cmd_over_limit = false;
+                int motor_cmd_over_limit_joint = -1;
+                float motor_cmd_before_clip = 0.0f;
                 for (int i = 0; i < ACTION_DIM; ++i) {
                     // 应用滤波: 0.8*current_action + 0.2*last_action
                     float filtered = 0.8f * action[i] + 0.2f * last_action[i];
 
-                    // 转换为电机指令: action = action_flt * 0.25 + init_pos
+                    // 先对相对初始姿态的偏移量限幅，再叠加标定初始姿态
+                    if (filtered < -kFilteredActionLimit) filtered = -kFilteredActionLimit;
+                    if (filtered > kFilteredActionLimit) filtered = kFilteredActionLimit;
                     float motor_cmd = filtered * 0.25f + calibrated_init_pos[i];
 
-                    // 限制范围
-                    if (motor_cmd < -5.0f) motor_cmd = -5.0f;
-                    if (motor_cmd > 5.0f) motor_cmd = 5.0f;
+                    if (motor_cmd < -kMotorCmdSafetyLimit) {
+                        motor_cmd_before_clip = motor_cmd;
+                        motor_cmd = -kMotorCmdSafetyLimit;
+                        motor_cmd_over_limit = true;
+                        motor_cmd_over_limit_joint = i;
+                    } else if (motor_cmd > kMotorCmdSafetyLimit) {
+                        motor_cmd_before_clip = motor_cmd;
+                        motor_cmd = kMotorCmdSafetyLimit;
+                        motor_cmd_over_limit = true;
+                        motor_cmd_over_limit_joint = i;
+                    }
 
                     response.q_exp[i] = motor_cmd;
                     last_action[i] = action[i];  // 保存原始action用于下一次滤波
                 }
-                infer_count++;
 
-                // 记录推理数据
-                auto current_time = std::chrono::high_resolution_clock::now();
-                std::chrono::duration<double> elapsed = current_time - start_time;
-                InferenceRecord record;
-                record.timestamp = elapsed.count();
-                for (int i = 0; i < ACTION_DIM; ++i) {
-                    record.action[i] = response.q_exp[i];
+                if (motor_cmd_over_limit) {
+                    enqueueEventRecord(
+                        "motor_cmd_over_limit",
+                        "最终电机目标位置超限，joint[" + std::to_string(motor_cmd_over_limit_joint) +
+                        "] = " + std::to_string(motor_cmd_before_clip) +
+                        " rad，阈值 = +/-" + std::to_string(kMotorCmdSafetyLimit) + " rad",
+                        &request,
+                        &response);
+                    resetToInitPose(
+                        "最终电机目标位置超限，joint[" + std::to_string(motor_cmd_over_limit_joint) +
+                        "] = " + std::to_string(motor_cmd_before_clip) +
+                        " rad，阈值 = +/-" + std::to_string(kMotorCmdSafetyLimit) + " rad");
+                    continue;
                 }
-                g_inference_records.push_back(record);
+                infer_count++;
+                CsvLogRecord inference_record = buildRecordFromState(
+                    &request, &response, "inference", "", "");
+                last_complete_record = inference_record;
+                has_last_complete_record = true;
+                csv_logger.enqueue(std::move(inference_record));
 
                 // 每0.5秒打印一次状态（250次 × 2ms = 500ms）
                 if (infer_count % 250 == 0) {
@@ -499,22 +651,16 @@ int main(int argc, char** argv) {
             } else {
                 // 推理失败、trigger!=1.0或输出有NaN，终止推理并回到初始姿态
                 if (has_nan) {
-                    std::cout << "\n[错误] 推理输出包含NaN，终止推理" << std::endl;
+                    enqueueEventRecord("nan_output", "推理输出包含NaN，终止推理", &request, &response);
+                    resetToInitPose("推理输出包含NaN，终止推理");
                 } else if (!infer_success) {
-                    std::cout << "\n[错误] 推理失败或trigger!=1.0，终止推理" << std::endl;
+                    enqueueEventRecord(
+                        "infer_failed",
+                        "推理失败或trigger!=1.0，trigger=" + std::to_string(request.trigger),
+                        &request,
+                        &response);
+                    resetToInitPose("推理失败或trigger!=1.0，终止推理");
                 }
-
-                std::cout << "正在回到初始姿态..." << std::endl;
-                moveToInitPose(udp, calibrated_init_pos);
-
-                // 重新初始化response
-                std::memset(&response, 0, sizeof(response));
-                for (int i = 0; i < ACTION_DIM; ++i) {
-                    response.q_exp[i] = calibrated_init_pos[i];
-                }
-
-                std::cout << "已回到初始姿态，重新开始控制循环" << std::endl;
-                std::cout << "========================================" << std::endl;
             }
         }
 
@@ -529,12 +675,9 @@ int main(int argc, char** argv) {
     std::cout << "总推理次数: " << infer_count << std::endl;
     std::cout << "========================================" << std::endl;
 
-    // 导出推理数据到CSV文件
-    if (!g_inference_records.empty()) {
-        exportInferenceDataToCSV("../data/inference_data.csv");
-    } else {
-        std::cout << "没有推理数据可导出" << std::endl;
-    }
+    enqueueEventRecord("ctrl_c", "收到Ctrl+C或终止信号，准备退出主程序", nullptr, &response);
+    csv_logger.stop();
+    std::cout << "CSV复盘日志已写入: " << csv_log_path << std::endl;
 
     gamepad.close();
 

@@ -8,8 +8,8 @@
  *          不涉及模型推理，仅验证网络连接和数据收发。
  *
  * @note 使用方法:
- *       ./test_udp [IP] [端口]
- *       ./test_udp 192.168.137.4 10000
+ *       ./test_udp [IP] [端口] [--verbose-every N]
+ *       ./test_udp 192.168.137.4 10000 --verbose-every 1
  */
 
 #include <iostream>
@@ -20,6 +20,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <csignal>
+#include <cerrno>
 
 using namespace std;
 
@@ -30,6 +31,7 @@ using namespace std;
  */
 
 /// ODroid发送的请求消息
+#pragma pack(push, 1)
 struct MsgRequest {
     float trigger;          ///< 触发标志
     float command[4];       ///< 控制指令
@@ -40,6 +42,7 @@ struct MsgRequest {
     float dq[10];           ///< 关节速度
     float tau[10];          ///< 关节力矩
     float init_pos[10];     ///< 初始位置
+    float quat[4];          ///< 四元数
 };
 
 /// Jetson发送的响应消息
@@ -48,6 +51,10 @@ struct MsgResponse {
     float dq_exp[10];       ///< 期望关节速度
     float tau_exp[10];      ///< 期望关节力矩
 };
+#pragma pack(pop)
+
+static_assert(sizeof(MsgRequest) == 58 * sizeof(float), "MsgRequest size must be 232 bytes");
+static_assert(sizeof(MsgResponse) == 30 * sizeof(float), "MsgResponse size must be 120 bytes");
 
 /// 运行标志
 volatile bool g_running = true;
@@ -71,7 +78,7 @@ void signal_handler(int sig) {
  *          4. 统计收发包数量
  *
  * @param argc 参数数量
- * @param argv 参数数组: [IP] [端口]
+ * @param argv 参数数组: [IP] [端口] [--verbose-every N]
  * @return 0表示正常退出
  */
 int main(int argc, char** argv) {
@@ -80,14 +87,37 @@ int main(int argc, char** argv) {
     signal(SIGTERM, signal_handler);
 
     // 解析命令行参数
-    string ip = (argc >= 2) ? argv[1] : "192.168.5.159";
-    int port = (argc >= 3) ? atoi(argv[2]) : 10000;
+    string ip = "192.168.5.159";
+    int port = 10000;
+    int verbose_every = 250;
+
+    int positional_index = 0;
+    for (int i = 1; i < argc; i++) {
+        string arg = argv[i];
+        if (arg == "--verbose-every" && i + 1 < argc) {
+            verbose_every = atoi(argv[++i]);
+        } else {
+            if (positional_index == 0) {
+                ip = arg;
+            } else if (positional_index == 1) {
+                port = atoi(arg.c_str());
+            }
+            positional_index++;
+        }
+    }
+
+    if (verbose_every <= 0) {
+        verbose_every = 250;
+    }
 
     // 打印测试信息
     cout << "========================================" << endl;
     cout << "  UDP通信测试" << endl;
     cout << "  目标: " << ip << ":" << port << endl;
+    cout << "  打印频率: 每 " << verbose_every << " 个有效包打印一次" << endl;
     cout << "========================================" << endl;
+    cout << "用法: " << argv[0] << " [IP] [端口] [--verbose-every N]" << endl;
+    cout << "提示: 传 --verbose-every 1 可逐包打印" << endl;
 
     // ========== 创建UDP socket ==========
     int sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -135,6 +165,9 @@ int main(int argc, char** argv) {
 
     socklen_t addr_len = sizeof(remote_addr);
     int recv_count = 0, send_count = 0;
+    int invalid_size_count = 0;
+    int timeout_count = 0;
+    int send_fail_count = 0;
 
     // ========== 主循环 ==========
     while (g_running) {
@@ -144,7 +177,7 @@ int main(int argc, char** argv) {
         int n = recvfrom(sock_fd, buf, sizeof(buf), 0,
                         (struct sockaddr*)&remote_addr, &addr_len);
 
-        if (n > 0) {
+        if (n == static_cast<int>(sizeof(request))) {
             // 解析请求
             memcpy(&request, buf, sizeof(request));
             recv_count++;
@@ -154,22 +187,126 @@ int main(int argc, char** argv) {
             if (sendto(sock_fd, buf, sizeof(response), 0,
                       (struct sockaddr*)&remote_addr, addr_len) > 0) {
                 send_count++;
+            } else {
+                send_fail_count++;
             }
 
             // 每0.5秒打印一次状态
-            if (recv_count % 250 == 0) {
+            if (recv_count % verbose_every == 0) {
                 cout << "\n[#" << recv_count << "] 收发正常" << endl;
+                cout << "  接收包长度: " << n << " bytes" << endl;
                 cout << "  trigger: " << request.trigger << endl;
-                cout << "  q[0-4]: [" << request.q[0] << ", " << request.q[1]
-                     << ", " << request.q[2] << ", " << request.q[3]
-                     << ", " << request.q[4] << "]" << endl;
+                cout << "  command[4]: [";
+                for (int i = 0; i < 4; i++) {
+                    cout << request.command[i];
+                    if (i < 3) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  eu_ang[3]: [";
+                for (int i = 0; i < 3; i++) {
+                    cout << request.eu_ang[i];
+                    if (i < 2) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  omega[3]: [";
+                for (int i = 0; i < 3; i++) {
+                    cout << request.omega[i];
+                    if (i < 2) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  acc[3]: [";
+                for (int i = 0; i < 3; i++) {
+                    cout << request.acc[i];
+                    if (i < 2) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  q[10]: [";
+                for (int i = 0; i < 10; i++) {
+                    cout << request.q[i];
+                    if (i < 9) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  dq[10]: [";
+                for (int i = 0; i < 10; i++) {
+                    cout << request.dq[i];
+                    if (i < 9) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  tau[10]: [";
+                for (int i = 0; i < 10; i++) {
+                    cout << request.tau[i];
+                    if (i < 9) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  init_pos[10]: [";
+                for (int i = 0; i < 10; i++) {
+                    cout << request.init_pos[i];
+                    if (i < 9) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  quat[4]: [";
+                for (int i = 0; i < 4; i++) {
+                    cout << request.quat[i];
+                    if (i < 3) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  发送 q_exp[10]: [";
+                for (int i = 0; i < 10; i++) {
+                    cout << response.q_exp[i];
+                    if (i < 9) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  发送 dq_exp[10]: [";
+                for (int i = 0; i < 10; i++) {
+                    cout << response.dq_exp[i];
+                    if (i < 9) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  发送 tau_exp[10]: [";
+                for (int i = 0; i < 10; i++) {
+                    cout << response.tau_exp[i];
+                    if (i < 9) cout << ", ";
+                }
+                cout << "]" << endl;
+
+                cout << "  统计: recv=" << recv_count
+                     << ", send=" << send_count
+                     << ", invalid_size=" << invalid_size_count
+                     << ", timeout=" << timeout_count
+                     << ", send_fail=" << send_fail_count << endl;
+            }
+        } else if (n > 0) {
+            invalid_size_count++;
+            cerr << "[警告] 收到异常长度数据包: " << n
+                 << " bytes，期望 " << sizeof(request) << " bytes" << endl;
+        } else if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                timeout_count++;
             }
         }
     }
 
     // ========== 打印统计信息 ==========
     cout << "\n========================================" << endl;
-    cout << "测试结束 - 发送: " << send_count << ", 接收: " << recv_count << endl;
+    cout << "测试结束" << endl;
+    cout << "有效接收: " << recv_count << endl;
+    cout << "成功发送: " << send_count << endl;
+    cout << "异常长度包: " << invalid_size_count << endl;
+    cout << "接收超时次数: " << timeout_count << endl;
+    cout << "发送失败次数: " << send_fail_count << endl;
+    cout << "收发差值: " << (recv_count - send_count) << endl;
+    cout << "说明: 当前协议中没有序号字段，无法精确统计真实UDP丢包率" << endl;
     cout << "========================================" << endl;
 
     close(sock_fd);

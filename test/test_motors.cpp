@@ -40,6 +40,7 @@ using namespace std;
  * ============================================================
  */
 
+#pragma pack(push, 1)
 struct MsgRequest {
     float trigger;
     float command[4];
@@ -50,6 +51,7 @@ struct MsgRequest {
     float dq[10];
     float tau[10];
     float init_pos[10];
+    float quat[4];
 };
 
 struct MsgResponse {
@@ -57,6 +59,10 @@ struct MsgResponse {
     float dq_exp[10];
     float tau_exp[10];
 };
+#pragma pack(pop)
+
+static_assert(sizeof(MsgRequest) == 58 * sizeof(float), "MsgRequest size must be 232 bytes");
+static_assert(sizeof(MsgResponse) == 30 * sizeof(float), "MsgResponse size must be 120 bytes");
 
 /// 运行标志
 volatile bool g_running = true;
@@ -307,6 +313,8 @@ int main(int argc, char** argv) {
     socklen_t addr_len = sizeof(remote_addr);
     bool connected = false;
     bool initialization_done = false;
+    float startup_pos[10] = {0.0f};
+    bool startup_pos_captured = false;
 
     // 记录起始时间
     struct timeval start_tv;
@@ -327,7 +335,7 @@ int main(int argc, char** argv) {
         int n = recvfrom(sock_fd, buf, sizeof(buf), 0,
                         (struct sockaddr*)&remote_addr, &addr_len);
 
-        if (n > 0) {
+        if (n == static_cast<int>(sizeof(request))) {
             memcpy(&request, buf, sizeof(request));
             recv_count++;
 
@@ -340,13 +348,21 @@ int main(int argc, char** argv) {
                      << ntohs(remote_addr.sin_port) << endl;
                 cout << "开始数据交互..." << endl;
 
+                for (int i = 0; i < 10; i++) {
+                    startup_pos[i] = request.q[i];
+                }
+                startup_pos_captured = true;
+
                 // 记录连接时间
                 struct timeval conn_tv;
                 gettimeofday(&conn_tv, NULL);
                 connection_time_us = conn_tv.tv_sec * 1000000ULL + conn_tv.tv_usec;
 
-                cout << "\n等待5秒让机器人回到初始姿态..." << endl;
+                cout << "\n用5秒时间平滑插值到初始姿态..." << endl;
             }
+        } else if (n > 0) {
+            cerr << "\n[警告] 收到异常长度数据包: " << n
+                 << " bytes，期望 " << sizeof(request) << " bytes" << endl;
         }
 
         // 获取当前时间
@@ -359,13 +375,21 @@ int main(int argc, char** argv) {
             uint64_t elapsed_since_connect = now_us - connection_time_us;
             if (elapsed_since_connect >= 5000000) {
                 initialization_done = true;
+                for (int i = 0; i < 10; i++) {
+                    response.q_exp[i] = init_pos[i];
+                    response.dq_exp[i] = 0.0f;
+                    response.tau_exp[i] = 0.0f;
+                }
                 cout << "✓ 初始化完成，开始正弦波测试..." << endl;
                 start_us = now_us;
                 last_print_time_us = now_us;
             } else {
-                // 初始化期间，发送初始位置
+                // 初始化期间，从首次反馈位置平滑插值到初始姿态
+                float alpha = static_cast<float>(elapsed_since_connect) / 5000000.0f;
+                if (alpha > 1.0f) alpha = 1.0f;
                 for (int i = 0; i < 10; i++) {
-                    response.q_exp[i] = init_pos[i];
+                    float from = startup_pos_captured ? startup_pos[i] : init_pos[i];
+                    response.q_exp[i] = from + alpha * (init_pos[i] - from);
                     response.dq_exp[i] = 0.0f;
                     response.tau_exp[i] = 0.0f;
                 }
@@ -374,7 +398,9 @@ int main(int argc, char** argv) {
                 float remaining_s = (5000000 - elapsed_since_connect) / 1000000.0f;
                 if ((int)(remaining_s * 10) % 5 == 0) {
                     cout << "\r初始化中... " << fixed << setprecision(1)
-                         << remaining_s << "s      " << flush;
+                         << remaining_s << "s"
+                         << " | alpha=" << setprecision(3) << alpha
+                         << "      " << flush;
                 }
 
                 if (connected) {

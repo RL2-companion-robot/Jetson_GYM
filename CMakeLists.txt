@@ -4,6 +4,8 @@ project(JetsonRLDeploy LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(Threads REQUIRED)
+
 # ============================================================
 # CUDA & TensorRT 配置
 # ============================================================
@@ -33,12 +35,14 @@ message(STATUS "TensorRT library: ${TENSORRT_LIBRARY}")
 # ============================================================
 set(SOURCES
     src/main.cpp
+    src/csv_logger.cpp
     src/communication.cpp
     src/trt_inference.cpp
     src/gamepad_input.cpp
 )
 
 set(HEADERS
+    include/csv_logger.h
     include/communication.h
     include/trt_inference.h
     include/types.h
@@ -57,6 +61,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${TENSORRT_LIBRARY}
     ${CUDA_LIBRARIES}
     ${CUDA_cudart_static_LIBRARY}
+    Threads::Threads
 )
 
 # ============================================================
@@ -76,6 +81,9 @@ target_include_directories(test_motors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 
 add_executable(test_init_pose test/test_init_pose.cpp)
 target_include_directories(test_init_pose PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(test_capture_init_pose_observation test/test_capture_init_pose_observation.cpp)
+target_include_directories(test_capture_init_pose_observation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # TensorRT模型测试
 add_executable(test_trt_engine test/test_trt_engine.cpp)

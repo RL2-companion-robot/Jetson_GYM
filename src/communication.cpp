@@ -141,10 +141,15 @@ bool UDPCommunication::receiveRequest(MsgRequest& request) {
     ssize_t received = recvfrom(sock_fd_, buffer, sizeof(buffer), MSG_WAITALL,
                                 (struct sockaddr*)&target_addr_, &addr_len_);
 
-    if (received > 0) {
+    if (received == static_cast<ssize_t>(sizeof(MsgRequest))) {
         // 将接收到的数据拷贝到输出结构体
         std::memcpy(&request, buffer, sizeof(MsgRequest));
         return true;
+    }
+
+    if (received > 0) {
+        std::cerr << "[UDP] Invalid request size: got " << received
+                  << " bytes, expected " << sizeof(MsgRequest) << " bytes" << std::endl;
     }
     return false;
 }

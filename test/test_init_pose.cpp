@@ -11,7 +11,7 @@
  *          3. 到达后保持初始位置不变
  *
  * @note 使用方法:
- *       ./test_init_pose [--ip IP] [--port PORT] [--config FILE] [--steps N]
+ *       ./test_init_pose [--ip IP] [--port PORT] [--config FILE]
  *
  * @warning 运行前请确保机器人处于安全状态！
  */
@@ -28,6 +28,7 @@
 
 using namespace std;
 
+#pragma pack(push, 1)
 struct MsgRequest {
     float trigger;
     float command[4];
@@ -38,6 +39,7 @@ struct MsgRequest {
     float dq[10];
     float tau[10];
     float init_pos[10];
+    float quat[4];
 };
 
 struct MsgResponse {
@@ -45,6 +47,10 @@ struct MsgResponse {
     float dq_exp[10];
     float tau_exp[10];
 };
+#pragma pack(pop)
+
+static_assert(sizeof(MsgRequest) == 58 * sizeof(float), "MsgRequest size must be 232 bytes");
+static_assert(sizeof(MsgResponse) == 30 * sizeof(float), "MsgResponse size must be 120 bytes");
 
 volatile bool g_running = true;
 
@@ -113,7 +119,7 @@ int main(int argc, char** argv) {
     string target_ip = "192.168.5.159";
     int port = 10000;
     string config_file = "../robot.yaml";
-    int steps = 500;  // 线性插值步数
+    constexpr uint64_t kInterpolationDurationUs = 5000000ULL;  // 固定5秒插值
 
     for (int i = 1; i < argc; i++) {
         string arg = argv[i];
@@ -123,8 +129,6 @@ int main(int argc, char** argv) {
             port = atoi(argv[++i]);
         } else if (arg == "--config" && i + 1 < argc) {
             config_file = argv[++i];
-        } else if (arg == "--steps" && i + 1 < argc) {
-            steps = atoi(argv[++i]);
         }
     }
 
@@ -190,53 +194,86 @@ int main(int argc, char** argv) {
     MsgResponse response;
     memset(&response, 0, sizeof(response));
 
-    // 获取当前位置
-    float current_pos[10] = {0};
-    bool got_feedback = false;
+    // 获取当前位置，作为插值起点
+    float startup_pos[10] = {0.0f};
+    bool startup_pos_captured = false;
 
-    for (int i = 0; i < 50 && !got_feedback; i++) {
+    for (int i = 0; i < 50 && !startup_pos_captured; i++) {
         sendto(sock, (char*)&response, sizeof(response), 0,
                (struct sockaddr*)&remote_addr, sizeof(remote_addr));
 
         socklen_t addr_len = sizeof(remote_addr);
-        if (recvfrom(sock, (char*)&request, sizeof(request), 0,
-                     (struct sockaddr*)&remote_addr, &addr_len) > 0) {
+        int received = recvfrom(sock, (char*)&request, sizeof(request), 0,
+                                (struct sockaddr*)&remote_addr, &addr_len);
+        if (received == static_cast<int>(sizeof(request))) {
             for (int j = 0; j < 10; j++) {
-                current_pos[j] = request.q[j];
+                startup_pos[j] = request.q[j];
             }
-            got_feedback = true;
+            startup_pos_captured = true;
             cout << "已连接ODroid" << endl;
+        } else if (received > 0) {
+            cerr << "[警告] 收到异常长度数据包: " << received
+                 << " bytes，期望 " << sizeof(request) << " bytes" << endl;
         }
         usleep(10000);
     }
 
-    if (!got_feedback) {
-        cout << "警告: 未收到反馈，使用零位作为起点" << endl;
+    if (!startup_pos_captured) {
+        cout << "警告: 未收到反馈，使用 init_pose 作为插值起点" << endl;
+        for (int i = 0; i < 10; i++) {
+            startup_pos[i] = init_pos[i];
+        }
     }
 
-    cout << "\n正在平滑移动到初始姿态..." << endl;
+    cout << "\n正在用5秒时间平滑插值到初始姿态..." << endl;
 
-    // 线性插值移动
-    for (int step = 0; step <= steps && g_running; step++) {
-        float alpha = (float)step / steps;
+    // 固定5秒线性插值移动
+    struct timeval interp_start_tv;
+    gettimeofday(&interp_start_tv, NULL);
+    uint64_t interp_start_us = interp_start_tv.tv_sec * 1000000ULL + interp_start_tv.tv_usec;
+
+    while (g_running) {
+        struct timeval now_tv;
+        gettimeofday(&now_tv, NULL);
+        uint64_t now_us = now_tv.tv_sec * 1000000ULL + now_tv.tv_usec;
+        uint64_t elapsed_us = now_us - interp_start_us;
+
+        float alpha = static_cast<float>(elapsed_us) / static_cast<float>(kInterpolationDurationUs);
+        if (alpha > 1.0f) alpha = 1.0f;
 
         for (int i = 0; i < 10; i++) {
-            response.q_exp[i] = current_pos[i] + alpha * (init_pos[i] - current_pos[i]);
+            response.q_exp[i] = startup_pos[i] + alpha * (init_pos[i] - startup_pos[i]);
+            response.dq_exp[i] = 0.0f;
+            response.tau_exp[i] = 0.0f;
         }
 
         sendto(sock, (char*)&response, sizeof(response), 0,
                (struct sockaddr*)&remote_addr, sizeof(remote_addr));
 
         socklen_t addr_len = sizeof(remote_addr);
-        recvfrom(sock, (char*)&request, sizeof(request), 0,
-                 (struct sockaddr*)&remote_addr, &addr_len);
+        int received = recvfrom(sock, (char*)&request, sizeof(request), 0,
+                                (struct sockaddr*)&remote_addr, &addr_len);
+        if (received > 0 && received != static_cast<int>(sizeof(request))) {
+            cerr << "[警告] 收到异常长度数据包: " << received
+                 << " bytes，期望 " << sizeof(request) << " bytes" << endl;
+        }
 
-        if (step % 50 == 0) {
-            cout << "进度: " << (int)(alpha * 100) << "%" << endl;
+        float remaining_s = static_cast<float>(kInterpolationDurationUs - (elapsed_us > kInterpolationDurationUs ? kInterpolationDurationUs : elapsed_us)) / 1000000.0f;
+        if ((static_cast<int>(remaining_s * 10) % 5) == 0) {
+            cout << "\r初始化中... " << fixed << setprecision(1)
+                 << remaining_s << "s"
+                 << " | alpha=" << setprecision(3) << alpha
+                 << "      " << flush;
+        }
+
+        if (elapsed_us >= kInterpolationDurationUs) {
+            break;
         }
 
         usleep(2000);  // 2ms
     }
+
+    cout << endl;
 
     cout << "已到达初始姿态，保持位置不变..." << endl;
     cout << "按 Ctrl+C 退出" << endl;
@@ -246,14 +283,20 @@ int main(int argc, char** argv) {
     while (g_running) {
         for (int i = 0; i < 10; i++) {
             response.q_exp[i] = init_pos[i];
+            response.dq_exp[i] = 0.0f;
+            response.tau_exp[i] = 0.0f;
         }
 
         sendto(sock, (char*)&response, sizeof(response), 0,
                (struct sockaddr*)&remote_addr, sizeof(remote_addr));
 
         socklen_t addr_len = sizeof(remote_addr);
-        recvfrom(sock, (char*)&request, sizeof(request), 0,
-                 (struct sockaddr*)&remote_addr, &addr_len);
+        int received = recvfrom(sock, (char*)&request, sizeof(request), 0,
+                                (struct sockaddr*)&remote_addr, &addr_len);
+        if (received > 0 && received != static_cast<int>(sizeof(request))) {
+            cerr << "[警告] 收到异常长度数据包: " << received
+                 << " bytes，期望 " << sizeof(request) << " bytes" << endl;
+        }
 
         loop_count++;
         if (loop_count % 250 == 0) {

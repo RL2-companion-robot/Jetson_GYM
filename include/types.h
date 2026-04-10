@@ -19,18 +19,20 @@
  *
  * @details 包含机器人的完整状态信息，作为强化学习模型的输入。
  *          数据由ODroid从STM32采集后通过UDP发送给Jetson。
- *          总大小: 1 + 4 + 3 + 3 + 3 + 10 + 10 + 10 + 10 = 54个float = 216字节
+ *          总大小: 1 + 4 + 3 + 3 + 3 + 10 + 10 + 10 + 10 + 4 = 58个float = 232字节
  */
+#pragma pack(push, 1)
 struct MsgRequest {
     float trigger;          ///< 触发标志: 1.0表示开始推理, 其他值表示待机
     float command[4];       ///< 控制指令: [vx, vy, yaw_rate, reserved] 来自遥控器
     float eu_ang[3];        ///< 欧拉角: [roll, pitch, yaw] 单位:弧度
     float omega[3];         ///< 角速度: [wx, wy, wz] 单位:rad/s
-    float acc[3];           ///< 加速度: [ax, ay, az] 单位:g
+    float acc[3];           ///< 加速度: [ax, ay, az] 单位:m/s²
     float q[10];            ///< 关节位置: 10个关节的当前角度 单位:弧度
     float dq[10];           ///< 关节速度: 10个关节的当前角速度 单位:rad/s
     float tau[10];          ///< 关节力矩: 10个关节的当前力矩 单位:Nm
-    float init_pos[10];     ///< 初始位置: 标定的初始站立姿态 单位:弧度
+    float init_pos[10];     ///< 初始/上次动作位置: 当前协议中保留传输，Jetson推理仍使用本地标定值
+    float quat[4];          ///< 四元数: [w, x, y, z]，来自Waveshare IMU
 };
 
 /**
@@ -45,6 +47,10 @@ struct MsgResponse {
     float dq_exp[10];       ///< 期望关节速度: 10个关节的目标角速度 单位:rad/s (通常为0)
     float tau_exp[10];      ///< 期望关节力矩: 10个关节的前馈力矩 单位:Nm (通常为0)
 };
+#pragma pack(pop)
+
+static_assert(sizeof(MsgRequest) == 58 * sizeof(float), "MsgRequest size must be 232 bytes");
+static_assert(sizeof(MsgResponse) == 30 * sizeof(float), "MsgResponse size must be 120 bytes");
 
 /*
  * ============================================================
