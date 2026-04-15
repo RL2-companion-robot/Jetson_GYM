@@ -26,6 +26,9 @@
 旧手动标定工具现已输出统一格式 YAML：`init_pose` 为人工采集值，`offset` 全为 `0`；同时新增 `calibration_sim_offset`，将机器人移动到代码里写死的仿真 `init_pose`，稳定后采样编码器均值并计算 `offset = encoder_raw - sim_init_pose`。
 主程序已切换到统一补偿逻辑：推理前使用 `q_obs = q_raw - offset` 作为网络观测，发送给 ODroid 的目标位置使用 `q_cmd = q_policy + offset`；所有回 `init_pose` 的控制路径也统一带上 offset。
 `test_init_pose.cpp`、`test_motors.cpp`、`test_capture_init_pose_observation.cpp` 已同步改为读取统一格式 YAML，并在发送位置目标时自动加上 offset。
+主程序现在要求显式传入 `--config`，不再允许静默使用默认路径；帮助信息会推荐 `../robot_manual_calibration.yaml`。`calibration_sim_offset.cpp` 已补充标定前姿态确认、大关节限位检查和与主程序一致的 `1.5 Nm` 扭矩超限保护。
+已重写 `README.md`，同步当前真实实现：统一标定接口 `init_pose + offset`、显式 `--config` 要求、两套标定流程、当前测试程序列表、日志导出方式以及模型转换入口。
+已在 `README.md` 的“推荐使用流程”中补充仿真对齐标定的启动示例，明确 `robot_sim_offset_calibration.yaml` 的典型使用路径。
 
 ## 已完成项
 - 新增 `AGENTS.md`，记录仓库贡献指南、目录结构、构建命令、测试方式和提交要求。
@@ -51,6 +54,8 @@
 - 已新增 `calibration_sim_offset` 标定程序，输出 `init_pose=仿真指定值` 与 `offset=encoder_raw - sim_init_pose`。
 - 已将主部署程序切换到补偿坐标系：策略内部使用补偿后的关节位置，发送给 ODroid 的目标位置则自动加回 offset。
 - 已将 `test_init_pose.cpp`、`test_motors.cpp`、`test_capture_init_pose_observation.cpp` 切换到统一配置接口，避免在新 YAML 中误读 `offset`。
+- 已将主程序改为必须显式传入 `--config`，避免因漏传配置而静默退回旧行为。
+- 已为 `calibration_sim_offset.cpp` 增加标定前人工确认、仿真目标姿态限位检查、插值/保持阶段目标限位检查和扭矩超限保护。
 
 ## 剩余未完成事项
 - 后续每次实际修改代码、文档、构建配置或运行方式后，更新本文件中的“当前进度 / 已完成项 / 剩余未完成事项 / 风险和约束”。
@@ -80,7 +85,8 @@
 - `test_zero_pose.cpp` 是直接回全零位的联调工具，不读取 `robot.yaml`；使用前应确认机器人机械零位和控制零位一致，避免因零位定义不一致导致姿态风险。
 - 新统一格式 YAML 的语义是：`init_pose` 为网络/策略坐标系基准，`offset` 满足 `q_obs = q_raw - offset` 与 `q_cmd = q_policy + offset`。
 - `calibration_sim_offset.cpp` 当前将仿真 `init_pose` 写死在代码中；如果仿真默认姿态有变动，需要同步更新该文件。
-- 当前仓库默认 `--config ../robot.yaml` 仍可继续使用，因为统一读取器会把缺失的 `offset` 当作 0；新的推荐输出文件分别是 `robot_manual_calibration.yaml` 与 `robot_sim_offset_calibration.yaml`。
+- 旧格式 `../robot.yaml` 仍可继续使用，因为统一读取器会把缺失的 `offset` 当作 0；新的推荐输出文件分别是 `robot_manual_calibration.yaml` 与 `robot_sim_offset_calibration.yaml`。
+- 主程序虽然推荐 `../robot_manual_calibration.yaml`，但实际上不会替你补默认值；现场必须显式确认使用的是哪一个配置文件。
 
 ## 风险和约束
 - 该项目依赖 Jetson、CUDA、TensorRT 和部分硬件接口，很多验证步骤无法在无设备环境下完整复现。

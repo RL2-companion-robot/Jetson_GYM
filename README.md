@@ -1,303 +1,298 @@
 # Jetson RL 部署项目 (TensorRT版)
 
-本项目用于在 Jetson 平台上使用 TensorRT 部署强化学习策略，实现双足机器人的实时控制。通过 UDP 与 ODroid 控制器通信，实现 500Hz 的实时推理和电机控制。
+本项目用于在 Jetson 平台上部署双足机器人强化学习策略。Jetson 通过 UDP 与 ODroid 通信，在 500Hz 控制循环中完成观测构造、TensorRT 推理、动作后处理和电机目标位置下发。
 
 ## 项目概述
 
 **核心功能**：
-- 🚀 **高性能推理**：TensorRT 引擎实现 0.15ms 推理延迟（6666 FPS）
-- 🤖 **实时控制**：500Hz 控制循环，支持双足机器人运动
-- 📊 **数据记录**：自动记录推理数据并导出为 CSV 文件
-- 🎮 **手柄支持**：支持游戏手柄输入（通过 `/dev/input/js0` 接口）
-- ⚙️ **灵活配置**：YAML 格式的机器人标定文件
+- TensorRT 推理部署
+- UDP 实时通信
+- 500Hz 主控制循环
+- 手柄输入覆盖 command
+- 统一标定接口：`init_pose + offset`
+- 推理复盘 CSV 自动记录
 
 **系统架构**：
-```
-STM32 → ODroid → [UDP] → Jetson (TensorRT推理) → ODroid → STM32
+```text
+STM32 -> ODroid -> [UDP] -> Jetson (TensorRT推理) -> ODroid -> STM32
 ```
 
 ## 项目结构
 
-```
+```text
 project/
-├── CMakeLists.txt                    # CMake 构建配置
-├── README.md                         # 本文档
-├── CLAUDE.md                         # Claude Code 开发指南
-├── robot.yaml                        # 机器人标定配置文件
+├── CMakeLists.txt
+├── README.md
+├── robot.yaml                              # 旧格式兼容标定文件（offset 缺失时按 0 处理）
 ├── include/
-│   ├── types.h                       # 消息结构体定义 (MsgRequest/MsgResponse)
-│   ├── communication.h               # UDP 通信类头文件
-│   └── trt_inference.h               # TensorRT 推理类头文件
+│   ├── types.h
+│   ├── communication.h
+│   ├── trt_inference.h
+│   ├── gamepad_input.h
+│   ├── csv_logger.h
+│   └── calibration_config.h               # init_pose + offset 统一配置接口
 ├── src/
-│   ├── main.cpp                      # 主程序入口 (500Hz 控制循环 + CSV导出)
-│   ├── communication.cpp             # UDP 通信实现
-│   ├── trt_inference.cpp             # TensorRT 推理实现
-│   └── calibration_tool.cpp          # 关节标定工具
+│   ├── main.cpp
+│   ├── communication.cpp
+│   ├── trt_inference.cpp
+│   ├── gamepad_input.cpp
+│   ├── csv_logger.cpp
+│   ├── calibration_config.cpp
+│   ├── calibration_tool.cpp               # 旧手动标定：offset=0
+│   └── calibration_sim_offset.cpp         # 仿真 init_pose 对齐标定
 ├── test/
-│   ├── gamepad_calibration.cpp       # 手柄键码获取工具 (新增)
-│   ├── test_udp.cpp                  # UDP通信测试
-│   ├── test_motors.cpp               # 电机控制测试
-│   ├── test_trt_engine.cpp           # TensorRT引擎测试
-│   └── test_trt_engine_csv.cpp       # TensorRT引擎CSV对比测试
-├── tools/
-│   └── onnx_to_trt.cpp               # ONNX 转 TensorRT 工具
-└── scripts/
-    └── convert_to_trt.py             # 模型转换脚本
+│   ├── test_udp.cpp
+│   ├── test_motors.cpp
+│   ├── test_init_pose.cpp
+│   ├── test_zero_pose.cpp
+│   ├── test_capture_init_pose_observation.cpp
+│   ├── test_trt_engine.cpp
+│   ├── test_trt_engine_csv.cpp
+│   └── gamepad_calibration.cpp
+└── tools/
+    └── onnx_to_trt.cpp
 ```
 
-## 技术栈
+## 数据接口
 
-| 组件 | 版本 | 说明 |
-|------|------|------|
-| **设备** | Jetson Nano B01 | ARM64 架构，4GB 内存 |
-| **系统** | Ubuntu 18.04.6 LTS | 官方支持的 Jetson 系统 |
-| **CUDA** | 10.2+ | GPU 计算平台 |
-| **TensorRT** | 8.2.1.8+ | NVIDIA 推理优化引擎 |
-| **GCC** | 7.5.0+ | C++ 编译器 |
-| **CMake** | 3.14+ | 构建系统 |
-| **C++** | C++14 | 编程语言标准 |
+### UDP 消息
 
-## 主要功能模块
+- `MsgRequest`: `58` 个 `float`，共 `232 bytes`
+- `MsgResponse`: `30` 个 `float`，共 `120 bytes`
 
-### 1. 通信层 (Communication)
-**文件**: `include/communication.h`, `src/communication.cpp`
+`MsgRequest` 主要包含：
+- `trigger`
+- `command[4]`
+- `eu_ang[3]`
+- `omega[3]`
+- `acc[3]`
+- `q[10]`
+- `dq[10]`
+- `tau[10]`
+- `init_pos[10]`（当前保留传输，Jetson 推理不使用）
+- `quat[4]`
 
-- UDP 套接字管理和数据收发
-- 消息结构体定义 (`MsgRequest`, `MsgResponse`)
-- 非阻塞接收和超时处理
-- 与 ODroid 控制器的双向通信
+### 策略观测 (39维)
 
-**关键数据结构**:
-- `MsgRequest` (216 字节): 机器人状态 (39维观测)
-- `MsgResponse` (120 字节): 电机指令 (10维动作)
-
-### 2. 推理引擎 (TensorRT Inference)
-**文件**: `include/trt_inference.h`, `src/trt_inference.cpp`
-
-- TensorRT 引擎加载和管理
-- 观测向量构建 (39维)
-- 推理执行和输出处理
-- 动作滤波 (指数移动平均)
-- 电机指令缩放和限制
-
-**推理流程**:
-```
-观测 (39D) → TensorRT 推理 → 动作 (10D) → 滤波 → 缩放 → 电机指令
+```text
+omega(3) + eu_ang(3) + command(3) + (q - init_pose)(10) + dq(10) + last_action(10)
 ```
 
-### 3. 主控制循环 (Main Control Loop)
-**文件**: `src/main.cpp`
+## 统一标定接口
 
-- 500Hz 实时控制循环
-- YAML 标定文件加载
-- 推理数据记录和 CSV 导出
-- 优雅关闭处理 (Ctrl+C)
-- 自动故障恢复
+当前统一使用 YAML 中的两个字段：
+- `init_pose`
+- `offset`
 
-**关键特性**:
-- 推理失败或 NaN 检测时自动回到初始姿态
-- 每次推理记录时间戳和电机指令
-- 程序退出时自动导出 `inference_data.csv`
+语义如下：
+- `init_pose`: 网络/策略坐标系下的初始姿态
+- `offset`: 编码器坐标系到网络坐标系的补偿量
 
-### 4. 标定工具 (Calibration Tool)
-**文件**: `src/calibration_tool.cpp`
+运行时满足：
 
-- 交互式关节标定
-- YAML 格式配置文件生成
-- 单关节或全关节标定模式
-
-### 5. 手柄输入工具 (Gamepad Calibration) - 新增
-**文件**: `test/gamepad_calibration.cpp`
-
-- 读取 `/dev/input/js0` joystick 设备事件
-- 实时显示摇杆轴值和按钮键码
-- 支持映射后的速度命令显示
-- 非阻塞事件读取
-- 映射方案 A：左摇杆前后→`vx`，左摇杆左右→`vy`，右摇杆左右→`yaw_rate`
-- 速度限制：`vx/vy` 最大 `0.2 m/s`，`yaw_rate` 最大 `0.4 rad/s`
-- `LT` 按钮用于恢复到 `init_pose`
-
-## 数据流说明
-
-### 系统架构
-```
-STM32 (传感器/电机)
-  ↓
-ODroid (控制器)
-  ↓ UDP
-Jetson (TensorRT 推理)
-  ↓ UDP
-ODroid (控制器)
-  ↓
-STM32 (执行电机指令)
+```text
+q_obs = q_raw - offset
+q_cmd = q_policy + offset
 ```
 
-### 输入观测 (39维)
+### 两种标定方式
 
-| 索引 | 维度 | 说明 | 单位 |
-|------|------|------|------|
-| 0-2 | 3 | 角速度 (wx, wy, wz) | rad/s |
-| 3-5 | 3 | 欧拉角 (roll, pitch, yaw) | rad |
-| 6-8 | 3 | 控制指令 (vx, vy, yaw_rate) | m/s, rad/s |
-| 9-18 | 10 | 关节位置偏差 (q - init_pos) | rad |
-| 19-28 | 10 | 关节速度 (dq) | rad/s |
-| 29-38 | 10 | 上次动作 (action) | - |
+1. `calibration_tool`
+- 旧手动标定方式
+- 逐关节人工采集 `init_pose`
+- 输出统一格式 YAML
+- `offset` 全为 `0`
 
-### 输出动作 (10维)
+2. `calibration_sim_offset`
+- 新仿真对齐标定方式
+- 将机器人插值到代码中写死的仿真 `init_pose`
+- 稳定后采样编码器均值
+- 计算 `offset = encoder_raw - sim_init_pose`
+- 输出统一格式 YAML
 
-10 个关节的目标位置:
-- 0-4: 左腿 (yaw, roll, pitch, knee, ankle)
-- 5-9: 右腿 (yaw, roll, pitch, knee, ankle)
-
-**单位**: 弧度 (rad)
-
-## 编译和部署
-
-### 编译步骤
+## 构建
 
 ```bash
-cd project
 mkdir -p build && cd build
 cmake ..
 make -j$(nproc)
 ```
 
-**生成的可执行文件**:
-- `JetsonRLDeploy` - 主推理程序
-- `calibration_tool` - 关节标定工具
-- `gamepad_calibration` - 手柄键码获取工具
-- `test_udp` - UDP 通信测试
-- `test_motors` - 电机控制测试
-- `test_trt_engine` - TensorRT 引擎测试
-- `onnx_to_trt` - ONNX 转 TensorRT 工具
+主要可执行文件：
+- `JetsonRLDeploy`
+- `calibration_tool`
+- `calibration_sim_offset`
+- `test_udp`
+- `test_motors`
+- `test_init_pose`
+- `test_zero_pose`
+- `test_capture_init_pose_observation`
+- `test_trt_engine`
+- `test_trt_engine_csv`
+- `gamepad_calibration`
+- `onnx_to_trt`
 
-### 运行主程序
-
-```bash
-./JetsonRLDeploy ../model.engine --config ../robot.yaml --ip 192.168.5.159 --port 10000
-```
-
-**命令行选项**:
-- `<engine_path>`: TensorRT 引擎文件路径 (必需)
-- `--ip <IP>`: ODroid IP 地址 (默认: 192.168.5.159)
-- `--port <N>`: UDP 端口 (默认: 10000)
-- `--config <FILE>`: 标定文件路径 (默认: ../robot.yaml)
-
-### 数据导出
-
-程序退出时自动导出推理数据:
-```
-inference_data.csv
-```
-
-**CSV 格式**:
-```
-timestamp(s),action_0,action_1,...,action_9
-0.002000,0.5,0.3,...
-0.004000,0.51,0.31,...
-```
-
-## 性能指标
-
-| 指标 | 值 |
-|------|-----|
-| 推理延迟 | 0.15 ms |
-| 吞吐量 | 6666 FPS |
-| 控制频率 | 500 Hz |
-| 相比 LibTorch 加速 | 20-30x |
-
-## 使用流程
-
-### 第一步：模型转换
-
-在 Jetson 上将 PyTorch 模型转换为 TensorRT 引擎:
+## 运行主程序
 
 ```bash
-cd scripts
-python convert_to_trt.py ../model.pt ../model.engine --full
+./JetsonRLDeploy ../model.engine --config ../robot_manual_calibration.yaml --ip 192.168.5.159 --port 10000
 ```
 
-**注意**: TensorRT 引擎与 GPU 架构绑定，必须在目标 Jetson 设备上生成！
+**注意**：
+- `<engine_path>` 必填
+- `--config` 现在也必须显式传入
+- 如果不传 `--config`，主程序会直接拒绝启动
+- 推荐配置文件：
+  - `../robot_manual_calibration.yaml`
+  - `../robot_sim_offset_calibration.yaml`
 
-### 第二步：测试 TensorRT 引擎
+## 模型转换
+
+当前保留的模型转换入口是 C++ 工具：
 
 ```bash
 cd build
-./test_trt_engine ../model.engine
+./onnx_to_trt ../model.onnx ../model.engine
 ```
 
-### 第三步：标定机器人
+TensorRT 引擎与 GPU 架构绑定，必须在目标 Jetson 上生成。
 
-```bash
-./calibration_tool
-```
+## 推荐使用流程
 
-### 第四步：运行主程序
-
-```bash
-./JetsonRLDeploy ../model.engine --config ../robot.yaml
-```
-
-## 测试指南
-
-### 1. UDP 通信测试
-
-```bash
-./test_udp [IP] [端口]
-```
-
-### 2. 电机控制测试
-
-```bash
-./test_motors --ip 192.168.5.159 --config ../robot.yaml
-```
-
-### 3. TensorRT 引擎测试
+### 1. 测试 TensorRT 引擎
 
 ```bash
 ./test_trt_engine ../model.engine
 ```
 
-### 4. 手柄键码获取
+### 2. 选择一种标定方式
+
+旧手动标定：
+
+```bash
+./calibration_tool --output ../robot_manual_calibration.yaml
+```
+
+仿真对齐标定：
+
+```bash
+./calibration_sim_offset --output ../robot_sim_offset_calibration.yaml
+```
+
+### 3. 测试回姿态
+
+```bash
+./test_init_pose --ip 192.168.5.159 --config ../robot_manual_calibration.yaml
+```
+
+### 4. 运行主程序
+
+```bash
+./JetsonRLDeploy ../model.engine --config ../robot_manual_calibration.yaml
+```
+
+如果你使用的是仿真对齐标定，则建议按下面这组命令启动：
+
+```bash
+./calibration_sim_offset --output ../robot_sim_offset_calibration.yaml
+./test_init_pose --ip 192.168.5.159 --config ../robot_sim_offset_calibration.yaml
+./JetsonRLDeploy ../model.engine --config ../robot_sim_offset_calibration.yaml
+```
+
+## 测试程序
+
+### UDP 通信测试
+
+```bash
+./test_udp [IP] [PORT]
+```
+
+### 电机正弦运动测试
+
+```bash
+./test_motors --ip 192.168.5.159 --config ../robot_manual_calibration.yaml
+```
+
+### 回初始姿态测试
+
+```bash
+./test_init_pose --ip 192.168.5.159 --config ../robot_manual_calibration.yaml
+```
+
+### 回零位测试
+
+```bash
+./test_zero_pose --ip 192.168.5.159 --port 10000
+```
+
+### 静站观测采集
+
+```bash
+./test_capture_init_pose_observation --ip 192.168.5.159 --config ../robot_manual_calibration.yaml
+```
+
+### TensorRT 与 CSV 对比
+
+```bash
+./test_trt_engine_csv ../model.engine ../sim_inputs_outputs_100steps.csv
+```
+
+### 手柄键码获取
 
 ```bash
 ./gamepad_calibration /dev/input/js0
 ```
 
+## 日志与复盘
+
+主程序运行时会在 `data/` 下自动生成时间戳命名的 CSV，例如：
+
+```text
+data/deploy_log_2026-04-15_14-30-20.csv
+```
+
+CSV 包含两类记录：
+- `inference`: 成功推理后的期望位置/速度/力矩、实际位置/速度/力矩、IMU
+- `event`: `Ctrl+C`、推理失败、NaN、扭矩超限、`motor_cmd` 越界等事件
+
+## 当前控制与安全逻辑
+
+- `moveToInitPose()` 统一使用固定 `5s` 插值
+- 主程序有两层一次触发即回退保护：
+  - 扭矩反馈超过 `1.5 Nm`
+  - 最终 `motor_cmd` 超出关节限位
+- 关节位置限位来自 URDF，当前已改为按关节分别 clip
+- `calibration_sim_offset` 在开始前要求人工输入大写 `YES` 确认，并带有关节限位和扭矩保护
+
 ## 常见问题
 
-### 1. TensorRT 找不到
+### 1. 主程序启动时报错必须传 `--config`
 
-确保 TensorRT 已安装，或设置路径:
+这是当前设计要求。请显式传入正确的标定文件，例如：
+
+```bash
+./JetsonRLDeploy ../model.engine --config ../robot_manual_calibration.yaml
+```
+
+### 2. TensorRT 找不到
+
 ```bash
 cmake .. -DTENSORRT_ROOT=/usr/local/tensorrt
 ```
 
-### 2. 引擎加载失败
+### 3. 标定文件加载失败
 
-- TensorRT 引擎与 GPU 架构绑定，必须在目标设备上生成
-- 检查 TensorRT 版本是否匹配
-
-### 3. CUDA 内存不足
-
-- 减小 batch size
-- 使用 FP16 精度
+- 检查 YAML 是否包含 `init_pose`
+- 新格式推荐同时包含 `offset`
+- 旧格式 `robot.yaml` 仍可兼容读取，此时 `offset` 自动视为 `0`
 
 ### 4. 推理结果异常
 
-- 检查模型输入输出维度是否正确 (39 → 10)
-- 验证 ONNX 导出是否正确
+- 检查模型输入输出签名是否正确
+- 检查标定文件是否与当前机器人一致
+- 检查 `offset` 是否来自正确的标定流程
 
-### 5. 标定文件加载失败
+## 开发说明
 
-- 检查 `robot.yaml` 文件格式
-- 确保包含 10 个标定值 (左腿 5 个 + 右腿 5 个)
-- 使用 `calibration_tool` 重新生成标定文件
-
-## 开发指南
-
-详见 [CLAUDE.md](CLAUDE.md) 了解项目架构、常用命令和开发建议。
-
-## 许可证
-
-MIT License
+仓库内持续进度记录见 [TASK.md](TASK.md)。  
+贡献和协作约定见 [AGENTS.md](AGENTS.md)。

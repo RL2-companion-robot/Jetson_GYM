@@ -126,7 +126,7 @@ void printUsage(const char* prog) {
     std::cout << "  engine_path: TensorRT引擎文件路径 (.engine)" << std::endl;
     std::cout << "  --ip <IP>:    ODroid IP地址 (默认: 192.168.5.159)" << std::endl;
     std::cout << "  --port <N>:   UDP端口 (默认: 10000)" << std::endl;
-    std::cout << "  --config <F>: 标定文件路径 (默认: ../robot.yaml)" << std::endl;
+    std::cout << "  --config <F>: 标定文件路径 (必填，推荐: ../robot_manual_calibration.yaml)" << std::endl;
 }
 
 /**
@@ -243,7 +243,8 @@ int main(int argc, char** argv) {
     std::string engine_path = argv[1];              // TensorRT引擎路径
     std::string target_ip = "192.168.5.159";        // ODroid IP地址
     int port = 10000;                               // UDP端口
-    std::string config_file = "../robot.yaml";      // 标定文件路径
+    std::string config_file = "../robot_manual_calibration.yaml";  // 推荐标定文件路径
+    bool has_config = false;
 
     for (int i = 2; i < argc; i++) {
         std::string arg = argv[i];
@@ -253,7 +254,15 @@ int main(int argc, char** argv) {
             port = std::atoi(argv[++i]);
         } else if (arg == "--config" && i + 1 < argc) {
             config_file = argv[++i];
+            has_config = true;
         }
+    }
+
+    if (!has_config) {
+        std::cerr << "错误: 当前部署程序要求显式传入 --config。" << std::endl;
+        std::cerr << "推荐使用: --config ../robot_manual_calibration.yaml" << std::endl;
+        printUsage(argv[0]);
+        return 1;
     }
 
     // ========== 注册信号处理函数 ==========

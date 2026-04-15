@@ -21,6 +21,8 @@
 #include <csignal>
 #include <sys/time.h>
 #include <cmath>
+#include <array>
+#include <limits>
 
 using namespace std;
 
@@ -31,11 +33,35 @@ volatile bool g_running = true;
 constexpr uint64_t kMoveDurationUs = 5000000ULL;
 constexpr uint64_t kSettleDurationUs = 2000000ULL;
 constexpr uint64_t kSampleWindowUs = 1000000ULL;
+constexpr float kTorqueFeedbackLimitNm = 1.5f;
 
 constexpr float kSimInitPose[DOF_NUM] = {
     0.0f, 0.0f, 0.18f, 1.11f, 0.92f,
     0.0f, 0.0f, -0.18f, -1.11f, -0.92f
 };
+
+constexpr std::array<const char*, DOF_NUM> kJointNames = {{
+    "joint_l_yaw",
+    "joint_l_roll",
+    "joint_l_pitch",
+    "joint_l_knee",
+    "joint_l_ankle",
+    "joint_r_yaw",
+    "joint_r_roll",
+    "joint_r_pitch",
+    "joint_r_knee",
+    "joint_r_ankle"
+}};
+
+constexpr std::array<float, DOF_NUM> kJointPosLowerLimits = {{
+    -0.20f, -0.09f, -1.57f, -1.57f, -1.35f,
+    -0.76f, -0.09f, -1.57f, -1.57f, -1.35f
+}};
+
+constexpr std::array<float, DOF_NUM> kJointPosUpperLimits = {{
+     0.76f,  0.56f,  1.57f,  1.57f,  1.57f,
+     0.20f,  0.56f,  1.57f,  1.57f,  1.57f
+}};
 
 void signal_handler(int sig) {
     cout << "\n收到信号 " << sig << ", 准备退出仿真对齐标定..." << endl;
@@ -46,6 +72,31 @@ uint64_t nowUs() {
     struct timeval tv;
     gettimeofday(&tv, nullptr);
     return tv.tv_sec * 1000000ULL + tv.tv_usec;
+}
+
+bool checkTargetWithinJointLimits(const float target[DOF_NUM], std::string& reason) {
+    for (int i = 0; i < DOF_NUM; ++i) {
+        if (target[i] < kJointPosLowerLimits[i] || target[i] > kJointPosUpperLimits[i]) {
+            reason = std::string("目标姿态超出关节限位，")
+                + kJointNames[i] + " = " + std::to_string(target[i])
+                + " rad, limit=[" + std::to_string(kJointPosLowerLimits[i])
+                + ", " + std::to_string(kJointPosUpperLimits[i]) + "]";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool checkTorqueOverLimit(const MsgRequest& request, std::string& reason) {
+    for (int i = 0; i < DOF_NUM; ++i) {
+        if (std::fabs(request.tau[i]) > kTorqueFeedbackLimitNm) {
+            reason = std::string("关节力矩超限，")
+                + kJointNames[i] + " = " + std::to_string(request.tau[i])
+                + " Nm, threshold=" + std::to_string(kTorqueFeedbackLimitNm) + " Nm";
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -90,6 +141,24 @@ int main(int argc, char** argv) {
     cout << "]" << endl;
     cout << "========================================" << endl;
 
+    std::string limit_reason;
+    if (!checkTargetWithinJointLimits(kSimInitPose, limit_reason)) {
+        cerr << "错误: " << limit_reason << endl;
+        return 1;
+    }
+
+    cout << "安全提示:" << endl;
+    cout << "  1. 请确认机器人处于保护状态（建议吊架/支撑）" << endl;
+    cout << "  2. 请确认周围无人接触机器人" << endl;
+    cout << "  3. 程序将用 5 秒时间插值到仿真 init_pose" << endl;
+    cout << "输入大写 YES 后继续，其他输入取消: " << flush;
+    string confirmation;
+    std::getline(cin, confirmation);
+    if (confirmation != "YES") {
+        cout << "已取消标定。" << endl;
+        return 0;
+    }
+
     int sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock_fd < 0) {
         cerr << "创建socket失败!" << endl;
@@ -131,6 +200,12 @@ int main(int argc, char** argv) {
         sendto(sock_fd, &response, sizeof(response), 0, (struct sockaddr*)&remote_addr, addr_len);
         int received = recvfrom(sock_fd, &request, sizeof(request), 0, (struct sockaddr*)&remote_addr, &addr_len);
         if (received == static_cast<int>(sizeof(MsgRequest))) {
+            std::string torque_reason;
+            if (checkTorqueOverLimit(request, torque_reason)) {
+                cerr << "错误: 建立连接阶段检测到 " << torque_reason << endl;
+                close(sock_fd);
+                return 1;
+            }
             for (int i = 0; i < DOF_NUM; ++i) {
                 startup_pos[i] = request.q[i];
             }
@@ -160,9 +235,23 @@ int main(int argc, char** argv) {
             response.tau_exp[i] = 0.0f;
         }
 
+        std::string move_limit_reason;
+        if (!checkTargetWithinJointLimits(response.q_exp, move_limit_reason)) {
+            cerr << "错误: 插值过程目标超限: " << move_limit_reason << endl;
+            close(sock_fd);
+            return 1;
+        }
+
         sendto(sock_fd, &response, sizeof(response), 0, (struct sockaddr*)&remote_addr, addr_len);
         int received = recvfrom(sock_fd, &request, sizeof(request), 0, (struct sockaddr*)&remote_addr, &addr_len);
-        if (received > 0 && received != static_cast<int>(sizeof(MsgRequest))) {
+        if (received == static_cast<int>(sizeof(MsgRequest))) {
+            std::string torque_reason;
+            if (checkTorqueOverLimit(request, torque_reason)) {
+                cerr << "错误: 运动阶段检测到 " << torque_reason << endl;
+                close(sock_fd);
+                return 1;
+            }
+        } else if (received > 0) {
             cout << "[警告] 收到异常长度数据包: " << received
                  << " bytes，期望 " << sizeof(MsgRequest) << " bytes" << endl;
         }
@@ -189,13 +278,28 @@ int main(int argc, char** argv) {
             response.tau_exp[i] = 0.0f;
         }
 
+        std::string settle_limit_reason;
+        if (!checkTargetWithinJointLimits(response.q_exp, settle_limit_reason)) {
+            cerr << "错误: 保持阶段目标超限: " << settle_limit_reason << endl;
+            close(sock_fd);
+            return 1;
+        }
+
         sendto(sock_fd, &response, sizeof(response), 0, (struct sockaddr*)&remote_addr, addr_len);
         int received = recvfrom(sock_fd, &request, sizeof(request), 0, (struct sockaddr*)&remote_addr, &addr_len);
-        if (received == static_cast<int>(sizeof(MsgRequest)) && in_sampling_window) {
-            for (int i = 0; i < DOF_NUM; ++i) {
-                encoder_sum[i] += request.q[i];
+        if (received == static_cast<int>(sizeof(MsgRequest))) {
+            std::string torque_reason;
+            if (checkTorqueOverLimit(request, torque_reason)) {
+                cerr << "错误: 保持阶段检测到 " << torque_reason << endl;
+                close(sock_fd);
+                return 1;
             }
-            sample_count++;
+            if (in_sampling_window) {
+                for (int i = 0; i < DOF_NUM; ++i) {
+                    encoder_sum[i] += request.q[i];
+                }
+                sample_count++;
+            }
         } else if (received > 0 && received != static_cast<int>(sizeof(MsgRequest))) {
             cout << "[警告] 收到异常长度数据包: " << received
                  << " bytes，期望 " << sizeof(MsgRequest) << " bytes" << endl;
