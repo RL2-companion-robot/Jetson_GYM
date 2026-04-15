@@ -17,7 +17,7 @@
 已将 `test/test_init_pose.cpp` 的插值流程和 `test_motors.cpp` 对齐：统一使用首次有效反馈作为插值起点，未收到反馈时回退到 `init_pose` 本身，并显式写入 `dq_exp/tau_exp = 0`。
 已将 `test/test_init_pose.cpp` 改为固定 5 秒定时插值；同时主部署程序 `src/main.cpp` 的 `moveToInitPose()` 也改为固定 5 秒回到 `init_pose`。
 已按当前控制语义调整主程序输出限幅顺序：先将滤波后的相对动作限幅到 `[-1.57, 1.57]`，再乘缩放并叠加 `calibrated_init_pos`，不再对最终位置做 `[-5, 5]` 绝对限幅。
-已在主部署程序中加入两层一次触发即回退的安全保护：`motor_cmd` 超过 `[-1.57, 1.57]` 或任一关节扭矩反馈超过 `1.5 Nm` 时，立即停止当前推理并用 5 秒插值回到 `init_pose`。
+已在主部署程序中加入两层一次触发即回退的安全保护：`motor_cmd` 超过 `[-1.57, 1.57]` 或任一关节扭矩反馈超过 `2.0 Nm` 时，立即停止当前推理并用 5 秒插值回到 `init_pose`。
 已新增异步 CSV 复盘日志链路：主程序现在会在 `data/` 下生成时间戳命名的新 CSV 文件，成功推理后记录一行 `inference`，异常保护或 `Ctrl+C` 时记录一行 `event`，由后台线程负责格式化时间戳、批量写盘并每 500ms flush 一次。
 已新增 `test/test_capture_init_pose_observation.cpp`，用于在 Jetson 上保持机器人处于 `init_pose`、实时接收 UDP 状态，并导出静站阶段的 39 维策略观测到 `data/` 下的单个 CSV。
 已新增 `test/test_zero_pose.cpp`，用于将 10 个关节从首次反馈位置在固定 5 秒内平滑插值到全零位，并在到达后持续保持零位。
@@ -26,9 +26,10 @@
 旧手动标定工具现已输出统一格式 YAML：`init_pose` 为人工采集值，`offset` 全为 `0`；同时新增 `calibration_sim_offset`，将机器人移动到代码里写死的仿真 `init_pose`，稳定后采样编码器均值并计算 `offset = encoder_raw - sim_init_pose`。
 主程序已切换到统一补偿逻辑：推理前使用 `q_obs = q_raw - offset` 作为网络观测，发送给 ODroid 的目标位置使用 `q_cmd = q_policy + offset`；所有回 `init_pose` 的控制路径也统一带上 offset。
 `test_init_pose.cpp`、`test_motors.cpp`、`test_capture_init_pose_observation.cpp` 已同步改为读取统一格式 YAML，并在发送位置目标时自动加上 offset。
-主程序现在要求显式传入 `--config`，不再允许静默使用默认路径；帮助信息会推荐 `../robot_manual_calibration.yaml`。`calibration_sim_offset.cpp` 已补充标定前姿态确认、大关节限位检查和与主程序一致的 `1.5 Nm` 扭矩超限保护。
+主程序现在要求显式传入 `--config`，不再允许静默使用默认路径；帮助信息会推荐 `../robot_manual_calibration.yaml`。`calibration_sim_offset.cpp` 已补充标定前姿态确认、大关节限位检查和与主程序一致的 `2.0 Nm` 扭矩超限保护。
 已重写 `README.md`，同步当前真实实现：统一标定接口 `init_pose + offset`、显式 `--config` 要求、两套标定流程、当前测试程序列表、日志导出方式以及模型转换入口。
 已在 `README.md` 的“推荐使用流程”中补充仿真对齐标定的启动示例，明确 `robot_sim_offset_calibration.yaml` 的典型使用路径。
+已调整 `calibration_sim_offset.cpp` 的连接阶段逻辑：不再在等待首帧反馈时发送全零位命令；收到第一帧后先回发当前位姿保持，再从当前位姿插值到仿真 `init_pose`，用于降低初始震荡。
 
 ## 已完成项
 - 新增 `AGENTS.md`，记录仓库贡献指南、目录结构、构建命令、测试方式和提交要求。

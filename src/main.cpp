@@ -47,7 +47,7 @@
 volatile bool g_running = true;
 
 constexpr float kActionToPositionScale = 0.25f;
-constexpr float kTorqueFeedbackLimitNm = 1.5f;
+constexpr float kTorqueFeedbackLimitNm = 2.0f;
 
 constexpr std::array<const char*, ACTION_DIM> kJointNames = {{
     "joint_l_yaw",

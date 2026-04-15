@@ -259,10 +259,10 @@ CSV 包含两类记录：
 
 - `moveToInitPose()` 统一使用固定 `5s` 插值
 - 主程序有两层一次触发即回退保护：
-  - 扭矩反馈超过 `1.5 Nm`
+  - 扭矩反馈超过 `2.0 Nm`
   - 最终 `motor_cmd` 超出关节限位
 - 关节位置限位来自 URDF，当前已改为按关节分别 clip
-- `calibration_sim_offset` 在开始前要求人工输入大写 `YES` 确认，并带有关节限位和扭矩保护
+- `calibration_sim_offset` 在开始前要求人工输入大写 `YES` 确认，并带有关节限位和扭矩保护（`2.0 Nm`）
 
 ## 常见问题
 

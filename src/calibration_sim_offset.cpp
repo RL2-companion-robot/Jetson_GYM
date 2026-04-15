@@ -33,7 +33,7 @@ volatile bool g_running = true;
 constexpr uint64_t kMoveDurationUs = 5000000ULL;
 constexpr uint64_t kSettleDurationUs = 2000000ULL;
 constexpr uint64_t kSampleWindowUs = 1000000ULL;
-constexpr float kTorqueFeedbackLimitNm = 1.5f;
+constexpr float kTorqueFeedbackLimitNm = 2.0f;
 
 constexpr float kSimInitPose[DOF_NUM] = {
     0.0f, 0.0f, 0.18f, 1.11f, 0.92f,
@@ -197,7 +197,6 @@ int main(int argc, char** argv) {
     bool connected = false;
     float startup_pos[DOF_NUM] = {0.0f};
     while (!connected && g_running) {
-        sendto(sock_fd, &response, sizeof(response), 0, (struct sockaddr*)&remote_addr, addr_len);
         int received = recvfrom(sock_fd, &request, sizeof(request), 0, (struct sockaddr*)&remote_addr, &addr_len);
         if (received == static_cast<int>(sizeof(MsgRequest))) {
             std::string torque_reason;
@@ -208,14 +207,19 @@ int main(int argc, char** argv) {
             }
             for (int i = 0; i < DOF_NUM; ++i) {
                 startup_pos[i] = request.q[i];
+                response.q_exp[i] = startup_pos[i];
+                response.dq_exp[i] = 0.0f;
+                response.tau_exp[i] = 0.0f;
             }
             connected = true;
-            cout << "✓ 已连接到ODroid，开始移动到仿真 init_pose..." << endl;
+            // 收到首帧反馈后，先回发当前位姿保持，避免连接阶段给出全零指令
+            sendto(sock_fd, &response, sizeof(response), 0, (struct sockaddr*)&remote_addr, addr_len);
+            cout << "✓ 已连接到ODroid，当前位姿保持完成，开始移动到仿真 init_pose..." << endl;
         } else if (received > 0) {
             cout << "[警告] 收到异常长度数据包: " << received
                  << " bytes，期望 " << sizeof(MsgRequest) << " bytes" << endl;
         }
-        usleep(100000);
+        usleep(10000);
     }
 
     if (!g_running) {
