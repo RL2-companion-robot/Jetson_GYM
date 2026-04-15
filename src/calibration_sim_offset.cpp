@@ -33,7 +33,7 @@ volatile bool g_running = true;
 constexpr uint64_t kMoveDurationUs = 5000000ULL;
 constexpr uint64_t kSettleDurationUs = 2000000ULL;
 constexpr uint64_t kSampleWindowUs = 1000000ULL;
-constexpr float kTorqueFeedbackLimitNm = 2.0f;
+constexpr float kTorqueFeedbackLimitNm = 4.0f;
 
 constexpr float kSimInitPose[DOF_NUM] = {
     0.0f, 0.0f, 0.18f, 1.11f, 0.92f,
