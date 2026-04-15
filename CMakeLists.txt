@@ -34,6 +34,7 @@ message(STATUS "TensorRT library: ${TENSORRT_LIBRARY}")
 # 主程序 (TensorRT)
 # ============================================================
 set(SOURCES
+    src/calibration_config.cpp
     src/main.cpp
     src/csv_logger.cpp
     src/communication.cpp
@@ -42,6 +43,7 @@ set(SOURCES
 )
 
 set(HEADERS
+    include/calibration_config.h
     include/csv_logger.h
     include/communication.h
     include/trt_inference.h
@@ -67,8 +69,11 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 # ============================================================
 # 标定工具
 # ============================================================
-add_executable(calibration_tool src/calibration_tool.cpp)
+add_executable(calibration_tool src/calibration_tool.cpp src/calibration_config.cpp include/calibration_config.h)
 target_include_directories(calibration_tool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(calibration_sim_offset src/calibration_sim_offset.cpp src/calibration_config.cpp include/calibration_config.h)
+target_include_directories(calibration_sim_offset PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # ============================================================
 # 测试程序
@@ -76,16 +81,16 @@ target_include_directories(calibration_tool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 add_executable(test_udp test/test_udp.cpp)
 target_include_directories(test_udp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_executable(test_motors test/test_motors.cpp)
+add_executable(test_motors test/test_motors.cpp src/calibration_config.cpp include/calibration_config.h)
 target_include_directories(test_motors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_executable(test_init_pose test/test_init_pose.cpp)
+add_executable(test_init_pose test/test_init_pose.cpp src/calibration_config.cpp include/calibration_config.h)
 target_include_directories(test_init_pose PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_executable(test_zero_pose test/test_zero_pose.cpp)
 target_include_directories(test_zero_pose PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_executable(test_capture_init_pose_observation test/test_capture_init_pose_observation.cpp)
+add_executable(test_capture_init_pose_observation test/test_capture_init_pose_observation.cpp src/calibration_config.cpp include/calibration_config.h)
 target_include_directories(test_capture_init_pose_observation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # TensorRT模型测试

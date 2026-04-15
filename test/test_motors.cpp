@@ -15,11 +15,11 @@
  *          正弦波会使所有关节同步运动。
  */
 
+#include "calibration_config.h"
 #define _USE_MATH_DEFINES
 #include <cmath>
 #include <iostream>
 #include <iomanip>
-#include <fstream>
 #include <cstring>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -34,36 +34,6 @@
 
 using namespace std;
 
-/*
- * ============================================================
- * 消息结构体定义
- * ============================================================
- */
-
-#pragma pack(push, 1)
-struct MsgRequest {
-    float trigger;
-    float command[4];
-    float eu_ang[3];
-    float omega[3];
-    float acc[3];
-    float q[10];
-    float dq[10];
-    float tau[10];
-    float init_pos[10];
-    float quat[4];
-};
-
-struct MsgResponse {
-    float q_exp[10];
-    float dq_exp[10];
-    float tau_exp[10];
-};
-#pragma pack(pop)
-
-static_assert(sizeof(MsgRequest) == 58 * sizeof(float), "MsgRequest size must be 232 bytes");
-static_assert(sizeof(MsgResponse) == 30 * sizeof(float), "MsgResponse size must be 120 bytes");
-
 /// 运行标志
 volatile bool g_running = true;
 
@@ -73,82 +43,6 @@ volatile bool g_running = true;
 void signal_handler(int sig) {
     cout << "\n收到信号 " << sig << ", 准备退出..." << endl;
     g_running = false;
-}
-
-/**
- * @brief 从YAML文件加载初始姿态
- */
-bool load_init_pose(const string& filename, float init_pos[10]) {
-    ifstream f(filename);
-    if (!f.is_open()) {
-        cerr << "警告: 无法打开配置文件 " << filename << endl;
-        cerr << "      将使用默认初始姿态" << endl;
-        return false;
-    }
-
-    cout << "正在读取配置文件: " << filename << " ... ";
-
-    // 关节名称到索引的映射
-    // 左腿: yaw(0), roll(1), pitch(2), knee(3), ankle(4)
-    // 右腿: yaw(5), roll(6), pitch(7), knee(8), ankle(9)
-    bool in_left_leg = false;
-    bool in_right_leg = false;
-    int count = 0;
-
-    string line;
-    while (getline(f, line)) {
-        // 跳过注释行
-        size_t first_char = line.find_first_not_of(" \t");
-        if (first_char != string::npos && line[first_char] == '#') continue;
-
-        // 检测当前在哪个腿的配置块
-        if (line.find("left_leg:") != string::npos) {
-            in_left_leg = true;
-            in_right_leg = false;
-            continue;
-        }
-        if (line.find("right_leg:") != string::npos) {
-            in_left_leg = false;
-            in_right_leg = true;
-            continue;
-        }
-
-        // 只在腿配置块内解析关节数据
-        if (!in_left_leg && !in_right_leg) continue;
-
-        int offset = in_left_leg ? 0 : 5;  // 左腿偏移0，右腿偏移5
-        int joint_idx = -1;
-
-        if (line.find("yaw:") != string::npos) joint_idx = 0;
-        else if (line.find("roll:") != string::npos) joint_idx = 1;
-        else if (line.find("pitch:") != string::npos) joint_idx = 2;
-        else if (line.find("knee:") != string::npos) joint_idx = 3;
-        else if (line.find("ankle:") != string::npos) joint_idx = 4;
-
-        if (joint_idx >= 0) {
-            size_t pos = line.find(':');
-            if (pos != string::npos) {
-                string val = line.substr(pos + 1);
-                size_t comment = val.find('#');
-                if (comment != string::npos) val = val.substr(0, comment);
-                size_t start = val.find_first_not_of(" \t");
-                if (start != string::npos) {
-                    try {
-                        init_pos[offset + joint_idx] = stof(val.substr(start));
-                        count++;
-                    } catch (...) {}
-                }
-            }
-        }
-    }
-
-    if (count == 10) {
-        cout << "✓ 成功!" << endl;
-        return true;
-    } else {
-        cerr << "\n错误: 配置文件不完整，仅读取到 " << count << " 个关节" << endl;
-        return false;
-    }
 }
 
 /**
@@ -234,10 +128,11 @@ int main(int argc, char** argv) {
     }
 
     // ========== 加载初始姿态 ==========
-    float init_pos[10] = {0};
-    bool yaml_loaded = load_init_pose(yaml_file, init_pos);
+    CalibrationConfig calibration;
+    bool yaml_loaded = loadCalibrationConfig(yaml_file, calibration);
 
     if (yaml_loaded) {
+        const float* init_pos = calibration.init_pose;
         cout << "\n初始姿态配置 (从 " << yaml_file << "):" << endl;
         cout << "  左腿: [";
         for (int i = 0; i < 5; i++) {
@@ -251,9 +146,16 @@ int main(int argc, char** argv) {
             if (i < 9) cout << ", ";
         }
         cout << "]" << endl;
+        cout << "  offset: [";
+        for (int i = 0; i < 10; i++) {
+            cout << calibration.offset[i];
+            if (i < 9) cout << ", ";
+        }
+        cout << "]" << endl;
     } else {
         cout << "\n使用默认初始姿态（未找到配置文件）" << endl;
         cout << "提示: 运行 ./calibration_tool 进行标定" << endl;
+        setZeroCalibrationConfig(calibration);
     }
     cout << "========================================" << endl;
 
@@ -349,7 +251,7 @@ int main(int argc, char** argv) {
                 cout << "开始数据交互..." << endl;
 
                 for (int i = 0; i < 10; i++) {
-                    startup_pos[i] = request.q[i];
+                    startup_pos[i] = request.q[i] - calibration.offset[i];
                 }
                 startup_pos_captured = true;
 
@@ -376,7 +278,7 @@ int main(int argc, char** argv) {
             if (elapsed_since_connect >= 5000000) {
                 initialization_done = true;
                 for (int i = 0; i < 10; i++) {
-                    response.q_exp[i] = init_pos[i];
+                    response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
                     response.dq_exp[i] = 0.0f;
                     response.tau_exp[i] = 0.0f;
                 }
@@ -388,8 +290,9 @@ int main(int argc, char** argv) {
                 float alpha = static_cast<float>(elapsed_since_connect) / 5000000.0f;
                 if (alpha > 1.0f) alpha = 1.0f;
                 for (int i = 0; i < 10; i++) {
-                    float from = startup_pos_captured ? startup_pos[i] : init_pos[i];
-                    response.q_exp[i] = from + alpha * (init_pos[i] - from);
+                    float from = startup_pos_captured ? startup_pos[i] : calibration.init_pose[i];
+                    float policy_q = from + alpha * (calibration.init_pose[i] - from);
+                    response.q_exp[i] = policy_q + calibration.offset[i];
                     response.dq_exp[i] = 0.0f;
                     response.tau_exp[i] = 0.0f;
                 }
@@ -431,7 +334,7 @@ int main(int argc, char** argv) {
 
         // 设置所有关节的目标位置 = 初始位置 + 正弦波
         for (int i = 0; i < 10; i++) {
-            response.q_exp[i] = init_pos[i] + sine_val;
+            response.q_exp[i] = calibration.init_pose[i] + sine_val + calibration.offset[i];
             response.dq_exp[i] = 0.0f;
             response.tau_exp[i] = 0.0f;
         }

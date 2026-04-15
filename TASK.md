@@ -21,6 +21,11 @@
 已新增异步 CSV 复盘日志链路：主程序现在会在 `data/` 下生成时间戳命名的新 CSV 文件，成功推理后记录一行 `inference`，异常保护或 `Ctrl+C` 时记录一行 `event`，由后台线程负责格式化时间戳、批量写盘并每 500ms flush 一次。
 已新增 `test/test_capture_init_pose_observation.cpp`，用于在 Jetson 上保持机器人处于 `init_pose`、实时接收 UDP 状态，并导出静站阶段的 39 维策略观测到 `data/` 下的单个 CSV。
 已新增 `test/test_zero_pose.cpp`，用于将 10 个关节从首次反馈位置在固定 5 秒内平滑插值到全零位，并在到达后持续保持零位。
+已根据 `Yuanbao_Deploy.urdf` 中各关节的 `lower/upper` 限位，将主程序中的统一 `clip` 改为按关节分别限幅：先根据 `robot.yaml` 的 `init_pose` 计算每个关节允许的相对偏移范围，再对最终 `motor_cmd` 按各关节的绝对位置上/下限做安全保护。
+已新增统一标定配置接口 `init_pose + offset`，并抽出共享读写模块 `calibration_config`。
+旧手动标定工具现已输出统一格式 YAML：`init_pose` 为人工采集值，`offset` 全为 `0`；同时新增 `calibration_sim_offset`，将机器人移动到代码里写死的仿真 `init_pose`，稳定后采样编码器均值并计算 `offset = encoder_raw - sim_init_pose`。
+主程序已切换到统一补偿逻辑：推理前使用 `q_obs = q_raw - offset` 作为网络观测，发送给 ODroid 的目标位置使用 `q_cmd = q_policy + offset`；所有回 `init_pose` 的控制路径也统一带上 offset。
+`test_init_pose.cpp`、`test_motors.cpp`、`test_capture_init_pose_observation.cpp` 已同步改为读取统一格式 YAML，并在发送位置目标时自动加上 offset。
 
 ## 已完成项
 - 新增 `AGENTS.md`，记录仓库贡献指南、目录结构、构建命令、测试方式和提交要求。
@@ -40,6 +45,12 @@
 - 已新增 `csv_logger` 模块，并将主程序的成功推理记录、异常事件记录和退出收尾接入同一个 CSV。
 - 已新增静站观测采集测试程序，导出的观测使用与主程序一致的缩放规则，但固定 `command=0`、`last_action=0`，专门用于与 `init_pose` 静站仿真阶段做分布对比。
 - 已新增零位测试程序 `test_zero_pose.cpp`，用于在安全联调时将各关节平滑回到 `0 rad` 并持续保持。
+- 已将主程序中的相对动作限幅与最终目标位置限幅都切换为按关节分别生效，不再使用统一的 `±1.57 rad`。
+- 已新增 `calibration_config` 共享模块，统一管理 `init_pose + offset` 的 YAML 读写。
+- 已保留旧手动标定方式，并将其输出改为统一格式：`init_pose` 为人工采集值，`offset` 全为 0。
+- 已新增 `calibration_sim_offset` 标定程序，输出 `init_pose=仿真指定值` 与 `offset=encoder_raw - sim_init_pose`。
+- 已将主部署程序切换到补偿坐标系：策略内部使用补偿后的关节位置，发送给 ODroid 的目标位置则自动加回 offset。
+- 已将 `test_init_pose.cpp`、`test_motors.cpp`、`test_capture_init_pose_observation.cpp` 切换到统一配置接口，避免在新 YAML 中误读 `offset`。
 
 ## 剩余未完成事项
 - 后续每次实际修改代码、文档、构建配置或运行方式后，更新本文件中的“当前进度 / 已完成项 / 剩余未完成事项 / 风险和约束”。
@@ -47,6 +58,7 @@
 - 若后续要继续开发，应进一步确认训练侧 ONNX 输入命名、历史观测定义以及实机 ODroid 端协议是否与当前 TensorRT 推理实现完全一致。
 - 若后续要做稳定性整改，应检查 `README.md` 和实际源码之间的漂移，例如导出路径、模型输入接口和文档中的旧描述。
 - 若后续仍需要 Python 侧模型导出能力，应基于当前双输入 TensorRT 接口重新实现，而不是恢复旧脚本。
+- 若后续需要让更多工具支持补偿坐标系，应继续梳理 `test_trt_engine`、`test_trt_engine_csv` 等是否也要感知 offset。
 
 ## 注意点 / 细节
 - 本文件放在仓库根目录，路径固定为 `TASK.md`。
@@ -61,10 +73,14 @@
 - `test_init_pose.cpp` 已不再支持 `--steps`；当前仓库里回到 `init_pose` 的主逻辑统一采用固定 5 秒插值。
 - 主程序当前仍保留 `trt_inference.cpp` 内部的一层动作平滑/限幅，以及 `main.cpp` 外层的一层动作平滑；本次只调整了 `main.cpp` 的限幅顺序，没有进一步重构双重滤波。
 - 当前扭矩保护按单次超限立即触发，没有连续计数或去抖逻辑；如果底层扭矩反馈存在瞬时毛刺，可能会比较敏感。
+- 当前按关节 `clip` 的限位值来自外部 URDF：`/home/zomnk/Documents/Yuanbao_RL_IsaacGym/resources/robots/ours_v2/URDF/Yuanbao_Deploy/urdf/Yuanbao_Deploy.urdf`；如果后续 URDF 更新，部署侧限位常量也需要同步更新。
 - 当前复盘 CSV 不包含温度字段，因为 Jetson/ODroid 现有通信协议里没有 10 个电机温度。
 - `event` 行默认复用最近一次完整 `inference` 快照；如果启动后尚未产生成功推理，就会退化为使用当前可用的 `request/response` 数据或零值。
 - `test_capture_init_pose_observation.cpp` 不是“真实部署观测采集器”，因为它固定 `command=0` 且不运行策略，因此更适合和静站仿真阶段做对齐，而不是和策略闭环阶段做对齐。
 - `test_zero_pose.cpp` 是直接回全零位的联调工具，不读取 `robot.yaml`；使用前应确认机器人机械零位和控制零位一致，避免因零位定义不一致导致姿态风险。
+- 新统一格式 YAML 的语义是：`init_pose` 为网络/策略坐标系基准，`offset` 满足 `q_obs = q_raw - offset` 与 `q_cmd = q_policy + offset`。
+- `calibration_sim_offset.cpp` 当前将仿真 `init_pose` 写死在代码中；如果仿真默认姿态有变动，需要同步更新该文件。
+- 当前仓库默认 `--config ../robot.yaml` 仍可继续使用，因为统一读取器会把缺失的 `offset` 当作 0；新的推荐输出文件分别是 `robot_manual_calibration.yaml` 与 `robot_sim_offset_calibration.yaml`。
 
 ## 风险和约束
 - 该项目依赖 Jetson、CUDA、TensorRT 和部分硬件接口，很多验证步骤无法在无设备环境下完整复现。

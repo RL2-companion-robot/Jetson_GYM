@@ -118,9 +118,9 @@ int main(int argc, char** argv) {
         std::vector<float> prop(row.begin(), row.begin() + PROP_DIM);
 
         // 提取 history (390维，从列39开始)
-        // 注意：CSV中的结构是 t0(39) + priv(44) + scan(187) + history(390) + actions(10)
-        // history 从列 39+44+187=270 开始
-        int history_start = 39 + 44 + 187;
+        // 注意：CSV中的结构是 t0(39) + history(390) + actions(10)
+        // history 从列 39 开始
+        int history_start = 39;
         std::vector<float> history(row.begin() + history_start,
                                    row.begin() + history_start + HISTORY_DIM);
 

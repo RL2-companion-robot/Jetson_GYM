@@ -15,6 +15,7 @@
  *       ./test_capture_init_pose_observation [--ip IP] [--port PORT] [--config FILE]
  */
 
+#include "calibration_config.h"
 #include "types.h"
 
 #include <arpa/inet.h>
@@ -94,69 +95,6 @@ std::string formatTimestamp(const std::chrono::system_clock::time_point& timesta
     oss << std::put_time(&local_tm, "%Y-%m-%d %H:%M:%S")
         << "." << std::setw(6) << std::setfill('0') << micros.count();
     return oss.str();
-}
-
-bool load_init_pose(const std::string& filename, float init_pos[DOF_NUM]) {
-    std::ifstream f(filename);
-    if (!f.is_open()) {
-        std::cerr << "错误: 无法打开配置文件 " << filename << std::endl;
-        return false;
-    }
-
-    bool in_left_leg = false;
-    bool in_right_leg = false;
-    int count = 0;
-    std::string line;
-
-    while (std::getline(f, line)) {
-        size_t first_char = line.find_first_not_of(" \t");
-        if (first_char != std::string::npos && line[first_char] == '#') {
-            continue;
-        }
-
-        if (line.find("left_leg:") != std::string::npos) {
-            in_left_leg = true;
-            in_right_leg = false;
-            continue;
-        }
-        if (line.find("right_leg:") != std::string::npos) {
-            in_left_leg = false;
-            in_right_leg = true;
-            continue;
-        }
-
-        size_t pos = line.find(':');
-        if (pos == std::string::npos) {
-            continue;
-        }
-
-        std::string val = line.substr(pos + 1);
-        size_t comment = val.find('#');
-        if (comment != std::string::npos) {
-            val = val.substr(0, comment);
-        }
-
-        size_t start = val.find_first_not_of(" \t");
-        if (start == std::string::npos) {
-            continue;
-        }
-
-        try {
-            float value = std::stof(val.substr(start));
-            int offset = in_left_leg ? 0 : 5;
-
-            if (line.find("yaw") != std::string::npos) init_pos[offset + 0] = value;
-            else if (line.find("roll") != std::string::npos) init_pos[offset + 1] = value;
-            else if (line.find("pitch") != std::string::npos) init_pos[offset + 2] = value;
-            else if (line.find("knee") != std::string::npos) init_pos[offset + 3] = value;
-            else if (line.find("ankle") != std::string::npos) init_pos[offset + 4] = value;
-
-            count++;
-        } catch (...) {
-        }
-    }
-
-    return count == 10;
 }
 
 float applyDeadzone(float value, float deadzone) {
@@ -245,8 +183,8 @@ int main(int argc, char** argv) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    float init_pos[DOF_NUM] = {0.0f};
-    if (!load_init_pose(config_file, init_pos)) {
+    CalibrationConfig calibration;
+    if (!loadCalibrationConfig(config_file, calibration)) {
         return 1;
     }
 
@@ -314,7 +252,7 @@ int main(int argc, char** argv) {
                                 (struct sockaddr*)&remote_addr, &addr_len);
         if (received == static_cast<int>(sizeof(request))) {
             for (int j = 0; j < DOF_NUM; ++j) {
-                startup_pos[j] = request.q[j];
+                startup_pos[j] = request.q[j] - calibration.offset[j];
             }
             startup_pos_captured = true;
             std::cout << "已连接ODroid" << std::endl;
@@ -328,7 +266,7 @@ int main(int argc, char** argv) {
     if (!startup_pos_captured) {
         std::cout << "警告: 未收到反馈，使用 init_pose 作为插值起点" << std::endl;
         for (int i = 0; i < DOF_NUM; ++i) {
-            startup_pos[i] = init_pos[i];
+            startup_pos[i] = calibration.init_pose[i];
         }
     }
 
@@ -341,7 +279,8 @@ int main(int argc, char** argv) {
         if (alpha > 1.0f) alpha = 1.0f;
 
         for (int i = 0; i < DOF_NUM; ++i) {
-            response.q_exp[i] = startup_pos[i] + alpha * (init_pos[i] - startup_pos[i]);
+            float policy_q = startup_pos[i] + alpha * (calibration.init_pose[i] - startup_pos[i]);
+            response.q_exp[i] = policy_q + calibration.offset[i];
             response.dq_exp[i] = 0.0f;
             response.tau_exp[i] = 0.0f;
         }
@@ -376,7 +315,7 @@ int main(int argc, char** argv) {
     std::cout << std::endl;
 
     for (int i = 0; i < DOF_NUM; ++i) {
-        response.q_exp[i] = init_pos[i];
+        response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
         response.dq_exp[i] = 0.0f;
         response.tau_exp[i] = 0.0f;
     }
@@ -399,8 +338,12 @@ int main(int argc, char** argv) {
                                 (struct sockaddr*)&remote_addr, &addr_len);
 
         if (received == static_cast<int>(sizeof(request))) {
+            MsgRequest request_for_obs = request;
+            for (int i = 0; i < DOF_NUM; ++i) {
+                request_for_obs.q[i] = request.q[i] - calibration.offset[i];
+            }
             float obs[OBS_DIM] = {0.0f};
-            buildObservationForInitPose(request, init_pos, cmd_x, cmd_y, cmd_rate, obs);
+            buildObservationForInitPose(request_for_obs, calibration.init_pose, cmd_x, cmd_y, cmd_rate, obs);
 
             writeCsvRow(csv, std::chrono::system_clock::now(), obs, request);
             sample_count++;

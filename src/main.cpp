@@ -16,6 +16,7 @@
  *       ./JetsonRLDeploy <engine_path> [--ip IP] [--port PORT] [--config FILE]
  */
 
+#include "calibration_config.h"
 #include "csv_logger.h"
 #include "communication.h"
 #include "trt_inference.h"
@@ -45,9 +46,33 @@
 /// 当收到SIGINT或SIGTERM信号时设为false
 volatile bool g_running = true;
 
-constexpr float kFilteredActionLimit = 1.57f;
-constexpr float kMotorCmdSafetyLimit = 1.57f;
+constexpr float kActionToPositionScale = 0.25f;
 constexpr float kTorqueFeedbackLimitNm = 1.5f;
+
+constexpr std::array<const char*, ACTION_DIM> kJointNames = {{
+    "joint_l_yaw",
+    "joint_l_roll",
+    "joint_l_pitch",
+    "joint_l_knee",
+    "joint_l_ankle",
+    "joint_r_yaw",
+    "joint_r_roll",
+    "joint_r_pitch",
+    "joint_r_knee",
+    "joint_r_ankle"
+}};
+
+// 关节绝对位置限位来自：
+// /home/zomnk/Documents/Yuanbao_RL_IsaacGym/resources/robots/ours_v2/URDF/Yuanbao_Deploy/urdf/Yuanbao_Deploy.urdf
+constexpr std::array<float, ACTION_DIM> kJointPosLowerLimits = {{
+    -0.20f, -0.09f, -1.57f, -1.57f, -1.35f,
+    -0.76f, -0.09f, -1.57f, -1.57f, -1.35f
+}};
+
+constexpr std::array<float, ACTION_DIM> kJointPosUpperLimits = {{
+     0.76f,  0.56f,  1.57f,  1.57f,  1.57f,
+     0.20f,  0.56f,  1.57f,  1.57f,  1.57f
+}};
 
 /**
  * @brief 信号处理函数
@@ -105,104 +130,6 @@ void printUsage(const char* prog) {
 }
 
 /**
- * @brief 从YAML文件加载标定数据
- *
- * @details 解析robot.yaml文件，提取10个关节的初始位置。
- *          文件格式示例：
- *          ```yaml
- *          robot_config:
- *            init_pose:
- *              left_leg:
- *                yaw:   0.0
- *                roll:  0.1
- *                ...
- *          ```
- *
- * @param filename YAML文件路径
- * @param init_pos 输出的初始位置数组（10个float）
- * @return 成功读取10个值返回true，否则返回false
- */
-bool loadCalibration(const std::string& filename, float init_pos[10]) {
-    std::ifstream f(filename);
-    if (!f.is_open()) {
-        std::cerr << "无法打开标定文件: " << filename << std::endl;
-        return false;
-    }
-
-    std::string line;
-    int idx = 0;
-    bool in_init_pose = false;
-
-    // 逐行解析YAML文件
-    while (std::getline(f, line) && idx < 10) {
-        // 移除前导空白
-        size_t start = line.find_first_not_of(" \t");
-        if (start == std::string::npos) continue;
-
-        std::string trimmed = line.substr(start);
-
-        // 检查是否进入init_pose部分
-        if (trimmed.find("init_pose:") != std::string::npos) {
-            in_init_pose = true;
-            continue;
-        }
-
-        // 如果遇到robot_config:之外的顶级配置项，退出
-        if (in_init_pose && start == 0 && trimmed.find("init_pose:") == std::string::npos &&
-            trimmed.find("robot_config:") == std::string::npos) {
-            break;
-        }
-
-        if (!in_init_pose) continue;
-
-        // 查找冒号分隔符
-        size_t pos = trimmed.find(':');
-        if (pos == std::string::npos) continue;
-
-        // 检查是否是配置项（如left_leg:, right_leg:等）
-        std::string key = trimmed.substr(0, pos);
-        key.erase(key.find_last_not_of(" \t") + 1);  // 移除尾部空白
-
-        // 跳过配置项标签（left_leg:, right_leg:等）
-        if (key == "left_leg" || key == "right_leg" || key == "robot_config") {
-            continue;
-        }
-
-        // 提取冒号后的值
-        std::string val = trimmed.substr(pos + 1);
-
-        // 移除注释部分
-        size_t comment = val.find('#');
-        if (comment != std::string::npos) val = val.substr(0, comment);
-
-        // 跳过前导空白
-        size_t val_start = val.find_first_not_of(" \t");
-        if (val_start == std::string::npos) continue;
-
-        // 尝试解析为浮点数
-        try {
-            float value = std::stof(val.substr(val_start));
-            init_pos[idx] = value;
-            std::cout << "  [" << (idx + 1) << "] " << key << " = " << value << std::endl;
-            idx++;
-        } catch (...) {
-            // 解析失败，跳过此行
-        }
-    }
-
-    f.close();
-
-    // 必须成功读取10个值
-    if (idx == 10) {
-        std::cout << "成功读取10个标定值" << std::endl;
-        return true;
-    } else {
-        std::cerr << "标定文件格式错误，只读取到 " << idx << " 个值，需要10个" << std::endl;
-        return false;
-    }
-}
-
-/**
  * @brief 缓慢移动机器人到初始姿态
  *
  * @details 使用线性插值将机器人从当前位置平滑移动到标定的初始姿态。
@@ -212,9 +139,10 @@ bool loadCalibration(const std::string& filename, float init_pos[10]) {
  *          其中alpha从0线性增加到1
  *
  * @param udp UDP通信对象
- * @param init_pos 目标初始姿态（10个关节）
+ * @param init_pos 目标初始姿态（网络坐标系）
+ * @param offset 编码器补偿量
  */
-void moveToInitPose(UDPCommunication& udp, const float init_pos[10]) {
+void moveToInitPose(UDPCommunication& udp, const float init_pos[10], const float offset[10]) {
     std::cout << "正在移动到标定的初始姿态..." << std::endl;
     constexpr uint64_t kInterpolationDurationUs = 5000000ULL;  // 固定5秒插值
 
@@ -233,7 +161,7 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10]) {
         if (udp.receiveRequest(request)) {
             // 保存当前关节位置
             for (int j = 0; j < 10; j++) {
-                current_pos[j] = request.q[j];
+                current_pos[j] = request.q[j] - offset[j];
             }
             got_feedback = true;
         }
@@ -260,7 +188,8 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10]) {
 
         // 计算插值位置
         for (int i = 0; i < 10; i++) {
-            response.q_exp[i] = current_pos[i] + alpha * (init_pos[i] - current_pos[i]);
+            float policy_q = current_pos[i] + alpha * (init_pos[i] - current_pos[i]);
+            response.q_exp[i] = policy_q + offset[i];
             response.dq_exp[i] = 0.0f;
             response.tau_exp[i] = 0.0f;
         }
@@ -277,7 +206,7 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10]) {
     }
 
     for (int i = 0; i < 10; i++) {
-        response.q_exp[i] = init_pos[i];
+        response.q_exp[i] = init_pos[i] + offset[i];
         response.dq_exp[i] = 0.0f;
         response.tau_exp[i] = 0.0f;
     }
@@ -343,12 +272,36 @@ int main(int argc, char** argv) {
     std::cout << "========================================" << std::endl;
 
     // ========== 加载标定配置 ==========
-    float calibrated_init_pos[10] = {0};
-    if (loadCalibration(config_file, calibrated_init_pos)) {
+    CalibrationConfig calibration;
+    if (loadCalibrationConfig(config_file, calibration)) {
         std::cout << "已加载标定文件: " << config_file << std::endl;
     } else {
         std::cout << "未找到标定文件，使用默认值" << std::endl;
+        setZeroCalibrationConfig(calibration);
     }
+
+    std::array<float, ACTION_DIM> filtered_action_lower_limits;
+    std::array<float, ACTION_DIM> filtered_action_upper_limits;
+    for (int i = 0; i < ACTION_DIM; ++i) {
+        filtered_action_lower_limits[i] =
+            (kJointPosLowerLimits[i] - calibration.init_pose[i]) / kActionToPositionScale;
+        filtered_action_upper_limits[i] =
+            (kJointPosUpperLimits[i] - calibration.init_pose[i]) / kActionToPositionScale;
+    }
+
+    std::cout << "已加载按关节位置限位:" << std::endl;
+    for (int i = 0; i < ACTION_DIM; ++i) {
+        std::cout << "  [" << i << "] " << kJointNames[i]
+                  << " abs=[" << kJointPosLowerLimits[i] << ", " << kJointPosUpperLimits[i] << "]"
+                  << " rel=[" << filtered_action_lower_limits[i] << ", " << filtered_action_upper_limits[i] << "]"
+                  << std::endl;
+    }
+    std::cout << "已加载 offset: [";
+    for (int i = 0; i < ACTION_DIM; ++i) {
+        std::cout << calibration.offset[i];
+        if (i + 1 < ACTION_DIM) std::cout << ", ";
+    }
+    std::cout << "]" << std::endl;
 
     // ========== 初始化UDP通信 ==========
     UDPCommunication udp(target_ip, port);
@@ -377,8 +330,8 @@ int main(int argc, char** argv) {
     std::cout << "CSV复盘日志: " << csv_log_path << std::endl;
 
     // ========== 设置初始姿态并移动 ==========
-    inference.setInitPose(calibrated_init_pos);
-    moveToInitPose(udp, calibrated_init_pos);
+    inference.setInitPose(calibration.init_pose);
+    moveToInitPose(udp, calibration.init_pose, calibration.offset);
 
     // ========== 初始化手柄输入 ==========
     GamepadInput gamepad;
@@ -401,7 +354,7 @@ int main(int argc, char** argv) {
     // ========== 问题1: 用init_pos初始化response ==========
     // 避免第一个数据包发送零位置指令
     for (int i = 0; i < ACTION_DIM; ++i) {
-        response.q_exp[i] = calibrated_init_pos[i];
+        response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
     }
 
     int loop_count = 0;   // 循环计数
@@ -476,9 +429,9 @@ int main(int argc, char** argv) {
             std::fill(last_action, last_action + ACTION_DIM, 0.0f);
             std::memset(&response, 0, sizeof(response));
             for (int i = 0; i < ACTION_DIM; ++i) {
-                response.q_exp[i] = calibrated_init_pos[i];
+                response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
             }
-            moveToInitPose(udp, calibrated_init_pos);
+            moveToInitPose(udp, calibration.init_pose, calibration.offset);
             std::cout << "已回到初始姿态，重新开始控制循环" << std::endl;
             std::cout << "========================================" << std::endl;
         };
@@ -490,9 +443,9 @@ int main(int argc, char** argv) {
             std::fill(last_action, last_action + ACTION_DIM, 0.0f);
             std::memset(&response, 0, sizeof(response));
             for (int i = 0; i < ACTION_DIM; ++i) {
-                response.q_exp[i] = calibrated_init_pos[i];
+                response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
             }
-            moveToInitPose(udp, calibrated_init_pos);
+            moveToInitPose(udp, calibration.init_pose, calibration.offset);
             continue;
         }
 
@@ -510,6 +463,11 @@ int main(int argc, char** argv) {
                 request.command[1] = vy;
                 request.command[2] = yaw_rate;
                 request.command[3] = 0.0f;
+            }
+
+            MsgRequest request_for_policy = request;
+            for (int i = 0; i < ACTION_DIM; ++i) {
+                request_for_policy.q[i] = request.q[i] - calibration.offset[i];
             }
 
             bool torque_over_limit = false;
@@ -543,7 +501,7 @@ int main(int argc, char** argv) {
             float action[ACTION_DIM];
 
             // 执行推理
-            bool infer_success = inference.infer(request, action);
+            bool infer_success = inference.infer(request_for_policy, action);
 
             // ========== 检查输出中是否有NaN ==========
             bool has_nan = false;
@@ -566,24 +524,24 @@ int main(int argc, char** argv) {
                     // 应用滤波: 0.8*current_action + 0.2*last_action
                     float filtered = 0.8f * action[i] + 0.2f * last_action[i];
 
-                    // 先对相对初始姿态的偏移量限幅，再叠加标定初始姿态
-                    if (filtered < -kFilteredActionLimit) filtered = -kFilteredActionLimit;
-                    if (filtered > kFilteredActionLimit) filtered = kFilteredActionLimit;
-                    float motor_cmd = filtered * 0.25f + calibrated_init_pos[i];
+                    // 先对相对初始姿态的偏移量按关节分别限幅，再叠加标定初始姿态
+                    if (filtered < filtered_action_lower_limits[i]) filtered = filtered_action_lower_limits[i];
+                    if (filtered > filtered_action_upper_limits[i]) filtered = filtered_action_upper_limits[i];
+                    float motor_cmd = filtered * kActionToPositionScale + calibration.init_pose[i];
 
-                    if (motor_cmd < -kMotorCmdSafetyLimit) {
+                    if (motor_cmd < kJointPosLowerLimits[i]) {
                         motor_cmd_before_clip = motor_cmd;
-                        motor_cmd = -kMotorCmdSafetyLimit;
+                        motor_cmd = kJointPosLowerLimits[i];
                         motor_cmd_over_limit = true;
                         motor_cmd_over_limit_joint = i;
-                    } else if (motor_cmd > kMotorCmdSafetyLimit) {
+                    } else if (motor_cmd > kJointPosUpperLimits[i]) {
                         motor_cmd_before_clip = motor_cmd;
-                        motor_cmd = kMotorCmdSafetyLimit;
+                        motor_cmd = kJointPosUpperLimits[i];
                         motor_cmd_over_limit = true;
                         motor_cmd_over_limit_joint = i;
                     }
 
-                    response.q_exp[i] = motor_cmd;
+                    response.q_exp[i] = motor_cmd + calibration.offset[i];
                     last_action[i] = action[i];  // 保存原始action用于下一次滤波
                 }
 
@@ -591,14 +549,18 @@ int main(int argc, char** argv) {
                     enqueueEventRecord(
                         "motor_cmd_over_limit",
                         "最终电机目标位置超限，joint[" + std::to_string(motor_cmd_over_limit_joint) +
+                        "] " + kJointNames[motor_cmd_over_limit_joint] +
                         "] = " + std::to_string(motor_cmd_before_clip) +
-                        " rad，阈值 = +/-" + std::to_string(kMotorCmdSafetyLimit) + " rad",
+                        " rad，阈值 = [" + std::to_string(kJointPosLowerLimits[motor_cmd_over_limit_joint]) +
+                        ", " + std::to_string(kJointPosUpperLimits[motor_cmd_over_limit_joint]) + "] rad",
                         &request,
                         &response);
                     resetToInitPose(
                         "最终电机目标位置超限，joint[" + std::to_string(motor_cmd_over_limit_joint) +
+                        "] " + kJointNames[motor_cmd_over_limit_joint] +
                         "] = " + std::to_string(motor_cmd_before_clip) +
-                        " rad，阈值 = +/-" + std::to_string(kMotorCmdSafetyLimit) + " rad");
+                        " rad，阈值 = [" + std::to_string(kJointPosLowerLimits[motor_cmd_over_limit_joint]) +
+                        ", " + std::to_string(kJointPosUpperLimits[motor_cmd_over_limit_joint]) + "] rad");
                     continue;
                 }
                 infer_count++;

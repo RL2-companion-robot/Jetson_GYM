@@ -16,6 +16,7 @@
  */
 
 #define _USE_MATH_DEFINES
+#include "calibration_config.h"
 #include <cmath>
 #include <iostream>
 #include <iomanip>
@@ -34,36 +35,6 @@
 #endif
 
 using namespace std;
-
-/*
- * ============================================================
- * 消息结构体定义（与ODroid保持一致）
- * ============================================================
- */
-
-#pragma pack(push, 1)
-struct MsgRequest {
-    float trigger;
-    float command[4];
-    float eu_ang[3];
-    float omega[3];
-    float acc[3];
-    float q[10];
-    float dq[10];
-    float tau[10];
-    float init_pos[10];
-    float quat[4];
-};
-
-struct MsgResponse {
-    float q_exp[10];
-    float dq_exp[10];
-    float tau_exp[10];
-};
-#pragma pack(pop)
-
-static_assert(sizeof(MsgRequest) == 58 * sizeof(float), "MsgRequest size must be 232 bytes");
-static_assert(sizeof(MsgResponse) == 30 * sizeof(float), "MsgResponse size must be 120 bytes");
 
 /*
  * ============================================================
@@ -121,49 +92,6 @@ void disable_raw_mode() {
         system("stty icanon echo");
         terminal_modified = false;
     }
-}
-
-/**
- * @brief 保存标定结果到YAML文件
- * @param init_pos 10个关节的初始位置
- * @param filename YAML文件路径
- */
-bool save_yaml(const float init_pos[10], const string& filename) {
-    ofstream f(filename);
-    if (!f.is_open()) return false;
-
-    f << "# 双足机器人初始姿态标定数据" << endl;
-    f << "# 生成时间: " << __DATE__ << " " << __TIME__ << endl;
-    f << "# 单位: 弧度 (rad)" << endl;
-    f << endl;
-    f << "robot_config:" << endl;
-    f << "  init_pose:" << endl;
-
-    // 左腿
-    f << "    left_leg:" << endl;
-    f << "      yaw:   " << fixed << setprecision(6) << init_pos[0] << "  # rad" << endl;
-    f << "      roll:  " << init_pos[1] << "  # rad" << endl;
-    f << "      pitch: " << init_pos[2] << "  # rad" << endl;
-    f << "      knee:  " << init_pos[3] << "  # rad" << endl;
-    f << "      ankle: " << init_pos[4] << "  # rad" << endl;
-
-    // 右腿
-    f << "    right_leg:" << endl;
-    f << "      yaw:   " << init_pos[5] << "  # rad" << endl;
-    f << "      roll:  " << init_pos[6] << "  # rad" << endl;
-    f << "      pitch: " << init_pos[7] << "  # rad" << endl;
-    f << "      knee:  " << init_pos[8] << "  # rad" << endl;
-    f << "      ankle: " << init_pos[9] << "  # rad" << endl;
-
-    // 备注说明
-    f << endl;
-    f << "  # 说明:" << endl;
-    f << "  # - 此文件由 calibration_tool 工具生成" << endl;
-    f << "  # - 请勿手动修改，除非了解参数含义" << endl;
-    f << "  # - 重新标定会覆盖此文件" << endl;
-
-    f.close();
-    return true;
 }
 
 /**
@@ -295,7 +223,7 @@ int main(int argc, char** argv) {
     // 解析命令行参数
     string ip = "192.168.5.159";
     int port = 10000;
-    string output = "../robot.yaml";
+    string output = "../robot_manual_calibration.yaml";
     int target_joint = -1;
 
     for (int i = 1; i < argc; i++) {
@@ -314,7 +242,7 @@ int main(int argc, char** argv) {
             cout << "  " << argv[0] << " [选项]" << endl;
             cout << "\n选项:" << endl;
             cout << "  --joint <ID>      只标定指定关节 (0-9)" << endl;
-            cout << "  --output <FILE>   指定输出文件 (默认: ../robot.yaml)" << endl;
+            cout << "  --output <FILE>   指定输出文件 (默认: ../robot_manual_calibration.yaml)" << endl;
             cout << "  --ip <IP>         ODroid IP地址" << endl;
             cout << "  --help, -h        显示此帮助信息" << endl;
             cout << "\n关节ID映射:" << endl;
@@ -395,7 +323,9 @@ int main(int argc, char** argv) {
     }
 
     // 标定数组
-    float init_pos[10] = {0};
+    CalibrationConfig calibration;
+    setZeroCalibrationConfig(calibration);
+    float* init_pos = calibration.init_pose;
 
     // 已标定位置数组（-9999.0表示未标定）
     float calibrated_positions[10];
@@ -404,26 +334,12 @@ int main(int argc, char** argv) {
     }
 
     // 读取现有配置（如果存在）
-    ifstream existing_yaml(output);
-    if (existing_yaml.is_open()) {
+    CalibrationConfig existing_config;
+    if (loadCalibrationConfig(output, existing_config)) {
         cout << "\n检测到现有配置文件，将作为默认值..." << endl;
-        string line;
-        int idx = 0;
-        while (getline(existing_yaml, line) && idx < 10) {
-            size_t pos = line.find(':');
-            if (pos != string::npos) {
-                string value_str = line.substr(pos + 1);
-                size_t comment_pos = value_str.find('#');
-                if (comment_pos != string::npos) {
-                    value_str = value_str.substr(0, comment_pos);
-                }
-                try {
-                    float value = stof(value_str);
-                    init_pos[idx++] = value;
-                } catch (...) {}
-            }
+        for (int i = 0; i < 10; ++i) {
+            init_pos[i] = existing_config.init_pose[i];
         }
-        existing_yaml.close();
     }
 
     // 执行标定
@@ -461,9 +377,13 @@ int main(int argc, char** argv) {
         cout << "========================================" << endl;
         cout << "\n保存到文件: " << output << " ... ";
 
-        if (save_yaml(init_pos, output)) {
+        for (int i = 0; i < 10; ++i) {
+            calibration.offset[i] = 0.0f;
+        }
+
+        if (saveCalibrationConfig(calibration, output)) {
             cout << "✓ 成功!" << endl;
-            cout << "\n标定完成！配置文件已生成。" << endl;
+            cout << "\n标定完成！统一格式配置文件已生成。" << endl;
             cout << "现在可以使用 test_motors 或其他程序读取此配置。" << endl;
         } else {
             cout << "✗ 失败!" << endl;

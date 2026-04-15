@@ -16,103 +16,24 @@
  * @warning 运行前请确保机器人处于安全状态！
  */
 
+#include "calibration_config.h"
 #include <iostream>
-#include <fstream>
 #include <cstring>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <csignal>
 #include <iomanip>
 
 using namespace std;
 
-#pragma pack(push, 1)
-struct MsgRequest {
-    float trigger;
-    float command[4];
-    float eu_ang[3];
-    float omega[3];
-    float acc[3];
-    float q[10];
-    float dq[10];
-    float tau[10];
-    float init_pos[10];
-    float quat[4];
-};
-
-struct MsgResponse {
-    float q_exp[10];
-    float dq_exp[10];
-    float tau_exp[10];
-};
-#pragma pack(pop)
-
-static_assert(sizeof(MsgRequest) == 58 * sizeof(float), "MsgRequest size must be 232 bytes");
-static_assert(sizeof(MsgResponse) == 30 * sizeof(float), "MsgResponse size must be 120 bytes");
-
 volatile bool g_running = true;
 
 void signal_handler(int sig) {
     cout << "\n收到信号 " << sig << ", 准备退出..." << endl;
     g_running = false;
-}
-
-bool load_init_pose(const string& filename, float init_pos[10]) {
-    ifstream f(filename);
-    if (!f.is_open()) {
-        cerr << "错误: 无法打开配置文件 " << filename << endl;
-        return false;
-    }
-
-    bool in_left_leg = false;
-    bool in_right_leg = false;
-    int count = 0;
-
-    string line;
-    while (getline(f, line)) {
-        size_t first_char = line.find_first_not_of(" \t");
-        if (first_char != string::npos && line[first_char] == '#') continue;
-
-        if (line.find("left_leg:") != string::npos) {
-            in_left_leg = true;
-            in_right_leg = false;
-            continue;
-        }
-        if (line.find("right_leg:") != string::npos) {
-            in_left_leg = false;
-            in_right_leg = true;
-            continue;
-        }
-
-        size_t pos = line.find(':');
-        if (pos == string::npos) continue;
-
-        string val = line.substr(pos + 1);
-        size_t comment = val.find('#');
-        if (comment != string::npos) val = val.substr(0, comment);
-
-        size_t start = val.find_first_not_of(" \t");
-        if (start == string::npos) continue;
-
-        try {
-            float value = stof(val.substr(start));
-            int offset = in_left_leg ? 0 : 5;
-
-            if (line.find("yaw") != string::npos) init_pos[offset + 0] = value;
-            else if (line.find("roll") != string::npos) init_pos[offset + 1] = value;
-            else if (line.find("pitch") != string::npos) init_pos[offset + 2] = value;
-            else if (line.find("knee") != string::npos) init_pos[offset + 3] = value;
-            else if (line.find("ankle") != string::npos) init_pos[offset + 4] = value;
-
-            count++;
-        } catch (...) {
-        }
-    }
-
-    f.close();
-    return count == 10;
 }
 
 int main(int argc, char** argv) {
@@ -141,18 +62,24 @@ int main(int argc, char** argv) {
     cout << "========================================" << endl;
 
     // 加载初始姿态
-    float init_pos[10] = {0};
-    if (!load_init_pose(config_file, init_pos)) {
+    CalibrationConfig calibration;
+    if (!loadCalibrationConfig(config_file, calibration)) {
         cerr << "错误: 无法加载初始姿态" << endl;
         return 1;
     }
 
     cout << "已加载初始姿态:" << endl;
     cout << "  左腿: [" << fixed << setprecision(3);
-    for (int i = 0; i < 5; i++) cout << init_pos[i] << " ";
+    for (int i = 0; i < 5; i++) cout << calibration.init_pose[i] << " ";
     cout << "]" << endl;
     cout << "  右腿: [";
-    for (int i = 5; i < 10; i++) cout << init_pos[i] << " ";
+    for (int i = 5; i < 10; i++) cout << calibration.init_pose[i] << " ";
+    cout << "]" << endl;
+    cout << "  offset: [";
+    for (int i = 0; i < 10; i++) {
+        cout << calibration.offset[i];
+        if (i < 9) cout << " ";
+    }
     cout << "]" << endl;
 
     // 创建UDP socket
@@ -207,7 +134,7 @@ int main(int argc, char** argv) {
                                 (struct sockaddr*)&remote_addr, &addr_len);
         if (received == static_cast<int>(sizeof(request))) {
             for (int j = 0; j < 10; j++) {
-                startup_pos[j] = request.q[j];
+                startup_pos[j] = request.q[j] - calibration.offset[j];
             }
             startup_pos_captured = true;
             cout << "已连接ODroid" << endl;
@@ -221,7 +148,7 @@ int main(int argc, char** argv) {
     if (!startup_pos_captured) {
         cout << "警告: 未收到反馈，使用 init_pose 作为插值起点" << endl;
         for (int i = 0; i < 10; i++) {
-            startup_pos[i] = init_pos[i];
+            startup_pos[i] = calibration.init_pose[i];
         }
     }
 
@@ -242,7 +169,8 @@ int main(int argc, char** argv) {
         if (alpha > 1.0f) alpha = 1.0f;
 
         for (int i = 0; i < 10; i++) {
-            response.q_exp[i] = startup_pos[i] + alpha * (init_pos[i] - startup_pos[i]);
+            float policy_q = startup_pos[i] + alpha * (calibration.init_pose[i] - startup_pos[i]);
+            response.q_exp[i] = policy_q + calibration.offset[i];
             response.dq_exp[i] = 0.0f;
             response.tau_exp[i] = 0.0f;
         }
@@ -282,7 +210,7 @@ int main(int argc, char** argv) {
     int loop_count = 0;
     while (g_running) {
         for (int i = 0; i < 10; i++) {
-            response.q_exp[i] = init_pos[i];
+            response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
             response.dq_exp[i] = 0.0f;
             response.tau_exp[i] = 0.0f;
         }
