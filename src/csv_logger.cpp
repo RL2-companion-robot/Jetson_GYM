@@ -128,6 +128,7 @@ void AsyncCsvLogger::writeHeader() {
 
     file_ << ",omega_x,omega_y,omega_z"
           << ",acc_x,acc_y,acc_z"
+          << ",raw_roll,raw_pitch,raw_yaw"
           << ",roll,pitch,yaw"
           << ",quat_w,quat_x,quat_y,quat_z"
           << "\n";
@@ -149,6 +150,7 @@ void AsyncCsvLogger::writeRecord(const CsvLogRecord& record) {
 
     for (float value : record.omega) file_ << "," << value;
     for (float value : record.acc) file_ << "," << value;
+    for (float value : record.eu_ang_raw) file_ << "," << value;
     for (float value : record.eu_ang) file_ << "," << value;
     for (float value : record.quat) file_ << "," << value;
 

@@ -30,6 +30,7 @@
 已重写 `README.md`，同步当前真实实现：统一标定接口 `init_pose + offset`、显式 `--config` 要求、两套标定流程、当前测试程序列表、日志导出方式以及模型转换入口。
 已在 `README.md` 的“推荐使用流程”中补充仿真对齐标定的启动示例，明确 `robot_sim_offset_calibration.yaml` 的典型使用路径。
 已调整 `calibration_sim_offset.cpp` 的连接阶段逻辑：不再在等待首帧反馈时发送全零位命令；收到第一帧后先回发当前位姿保持，再从当前位姿插值到仿真 `init_pose`，用于降低初始震荡。
+已在主程序中加入 `init_pose` 下的欧拉角零偏补偿：启动时先回到 `init_pose + offset`，在保持阶段连续采样一段时间的 `eu_ang` 求平均，后续推理前先做 `eu_ang_compensated = eu_ang_raw - euler_bias`；任意安全回退到 `init_pose` 后也会重新采样零偏。CSV 日志现同时记录原始欧拉角与补偿后的欧拉角。
 
 ## 已完成项
 - 新增 `AGENTS.md`，记录仓库贡献指南、目录结构、构建命令、测试方式和提交要求。
@@ -57,6 +58,7 @@
 - 已将 `test_init_pose.cpp`、`test_motors.cpp`、`test_capture_init_pose_observation.cpp` 切换到统一配置接口，避免在新 YAML 中误读 `offset`。
 - 已将主程序改为必须显式传入 `--config`，避免因漏传配置而静默退回旧行为。
 - 已为 `calibration_sim_offset.cpp` 增加标定前人工确认、仿真目标姿态限位检查、插值/保持阶段目标限位检查和扭矩超限保护。
+- 已在主程序中加入欧拉角零偏补偿流程：启动后和每次安全回到 `init_pose` 后，都会重新采样 `eu_ang` 偏置；策略输入使用补偿后的欧拉角，CSV 日志同时保留 `raw_roll/pitch/yaw` 与补偿后的 `roll/pitch/yaw`。
 
 ## 剩余未完成事项
 - 后续每次实际修改代码、文档、构建配置或运行方式后，更新本文件中的“当前进度 / 已完成项 / 剩余未完成事项 / 风险和约束”。
@@ -88,6 +90,8 @@
 - `calibration_sim_offset.cpp` 当前将仿真 `init_pose` 写死在代码中；如果仿真默认姿态有变动，需要同步更新该文件。
 - 旧格式 `../robot.yaml` 仍可继续使用，因为统一读取器会把缺失的 `offset` 当作 0；新的推荐输出文件分别是 `robot_manual_calibration.yaml` 与 `robot_sim_offset_calibration.yaml`。
 - 主程序虽然推荐 `../robot_manual_calibration.yaml`，但实际上不会替你补默认值；现场必须显式确认使用的是哪一个配置文件。
+- 当前欧拉角零偏补偿是在 `main.cpp` 收到 `request` 后先对 `eu_ang` 做减偏置，再把补偿后的 `request_for_policy` 传给推理；`trt_inference.cpp` 内部并不知道这层部署侧补偿。
+- 欧拉角零偏补偿目前采用“静站窗口内直接求均值”的方式，没有对 `yaw` 做跨 `±pi` 的 unwrap；在 `init_pose` 静站的小窗口内通常没问题，但若后续出现跨边界跳变，需要单独处理。
 
 ## 风险和约束
 - 该项目依赖 Jetson、CUDA、TensorRT 和部分硬件接口，很多验证步骤无法在无设备环境下完整复现。

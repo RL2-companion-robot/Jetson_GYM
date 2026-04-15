@@ -26,6 +26,7 @@ struct CsvLogRecord {
 
     std::array<float, 3> omega{};
     std::array<float, 3> acc{};
+    std::array<float, 3> eu_ang_raw{};
     std::array<float, 3> eu_ang{};
     std::array<float, 4> quat{};
 };

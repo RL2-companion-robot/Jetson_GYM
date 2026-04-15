@@ -48,6 +48,9 @@ volatile bool g_running = true;
 
 constexpr float kActionToPositionScale = 0.25f;
 constexpr float kTorqueFeedbackLimitNm = 2.0f;
+constexpr uint64_t kEulerBiasSettleUs = 300000ULL;
+constexpr uint64_t kEulerBiasSampleUs = 1000000ULL;
+constexpr int kEulerBiasMinSamples = 100;
 
 constexpr std::array<const char*, ACTION_DIM> kJointNames = {{
     "joint_l_yaw",
@@ -215,6 +218,63 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10], const float
     std::cout << "已到达初始姿态" << std::endl;
 }
 
+bool calibrateInitEulerBias(UDPCommunication& udp,
+                            const float init_pos[10],
+                            const float offset[10],
+                            float euler_bias[3]) {
+    std::cout << "开始采集 init_pose 下的欧拉角零偏..." << std::endl;
+
+    MsgRequest request;
+    MsgResponse response;
+    std::memset(&response, 0, sizeof(response));
+
+    for (int i = 0; i < DOF_NUM; ++i) {
+        response.q_exp[i] = init_pos[i] + offset[i];
+        response.dq_exp[i] = 0.0f;
+        response.tau_exp[i] = 0.0f;
+    }
+
+    float euler_sum[3] = {0.0f, 0.0f, 0.0f};
+    int sample_count = 0;
+    auto start = std::chrono::steady_clock::now();
+
+    while (g_running) {
+        udp.sendResponse(response);
+        if (udp.receiveRequest(request)) {
+            auto now = std::chrono::steady_clock::now();
+            uint64_t elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(now - start).count();
+
+            if (elapsed_us >= kEulerBiasSettleUs) {
+                for (int i = 0; i < 3; ++i) {
+                    euler_sum[i] += request.eu_ang[i];
+                }
+                sample_count++;
+            }
+
+            if (elapsed_us >= (kEulerBiasSettleUs + kEulerBiasSampleUs)) {
+                break;
+            }
+        }
+
+        usleep(2000);
+    }
+
+    if (sample_count < kEulerBiasMinSamples) {
+        std::cerr << "欧拉角零偏采样失败，有效样本数不足: " << sample_count << std::endl;
+        return false;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        euler_bias[i] = euler_sum[i] / static_cast<float>(sample_count);
+    }
+
+    std::cout << "欧拉角零偏采样完成: ["
+              << euler_bias[0] << ", "
+              << euler_bias[1] << ", "
+              << euler_bias[2] << "]" << std::endl;
+    return true;
+}
+
 /**
  * @brief 主函数
  *
@@ -369,10 +429,12 @@ int main(int argc, char** argv) {
     int loop_count = 0;   // 循环计数
     int infer_count = 0;  // 推理计数
     float last_action[ACTION_DIM] = {0};  // 上一步的action，用于滤波
+    float euler_bias[3] = {0.0f, 0.0f, 0.0f};
     CsvLogRecord last_complete_record;
     bool has_last_complete_record = false;
 
-    auto buildRecordFromState = [&](const MsgRequest* req,
+    auto buildRecordFromState = [&](const MsgRequest* req_raw,
+                                    const MsgRequest* req_policy,
                                     const MsgResponse* resp,
                                     const std::string& record_type,
                                     const std::string& event_type,
@@ -391,19 +453,29 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (req != nullptr) {
+        if (req_raw != nullptr) {
             for (int i = 0; i < ACTION_DIM; ++i) {
-                record.q[i] = req->q[i];
-                record.dq[i] = req->dq[i];
-                record.tau[i] = req->tau[i];
+                record.q[i] = req_raw->q[i];
+                record.dq[i] = req_raw->dq[i];
+                record.tau[i] = req_raw->tau[i];
             }
             for (int i = 0; i < 3; ++i) {
-                record.omega[i] = req->omega[i];
-                record.acc[i] = req->acc[i];
-                record.eu_ang[i] = req->eu_ang[i];
+                record.omega[i] = req_raw->omega[i];
+                record.acc[i] = req_raw->acc[i];
+                record.eu_ang_raw[i] = req_raw->eu_ang[i];
             }
             for (int i = 0; i < 4; ++i) {
-                record.quat[i] = req->quat[i];
+                record.quat[i] = req_raw->quat[i];
+            }
+        }
+
+        if (req_policy != nullptr) {
+            for (int i = 0; i < 3; ++i) {
+                record.eu_ang[i] = req_policy->eu_ang[i];
+            }
+        } else if (req_raw != nullptr) {
+            for (int i = 0; i < 3; ++i) {
+                record.eu_ang[i] = req_raw->eu_ang[i];
             }
         }
 
@@ -412,7 +484,8 @@ int main(int argc, char** argv) {
 
     auto enqueueEventRecord = [&](const std::string& event_type,
                                   const std::string& event_msg,
-                                  const MsgRequest* req,
+                                  const MsgRequest* req_raw,
+                                  const MsgRequest* req_policy,
                                   const MsgResponse* resp) {
         CsvLogRecord record;
         if (has_last_complete_record) {
@@ -422,10 +495,17 @@ int main(int argc, char** argv) {
             record.event_type = event_type;
             record.event_msg = event_msg;
         } else {
-            record = buildRecordFromState(req, resp, "event", event_type, event_msg);
+            record = buildRecordFromState(req_raw, req_policy, resp, "event", event_type, event_msg);
         }
         csv_logger.enqueue(std::move(record));
     };
+
+    if (!calibrateInitEulerBias(udp, calibration.init_pose, calibration.offset, euler_bias)) {
+        std::cerr << "初始欧拉角零偏采样失败，退出部署程序" << std::endl;
+        csv_logger.stop();
+        gamepad.close();
+        return 1;
+    }
 
     // ========== 主控制循环 ==========
     while (g_running) {
@@ -441,13 +521,16 @@ int main(int argc, char** argv) {
                 response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
             }
             moveToInitPose(udp, calibration.init_pose, calibration.offset);
+            if (!calibrateInitEulerBias(udp, calibration.init_pose, calibration.offset, euler_bias)) {
+                std::cerr << "警告: 回到初始姿态后的欧拉角零偏重采失败，保留上一份零偏" << std::endl;
+            }
             std::cout << "已回到初始姿态，重新开始控制循环" << std::endl;
             std::cout << "========================================" << std::endl;
         };
 
         if (gamepad.consumeLTPressedEdge()) {
             std::cout << "\n[手柄] LT按下，恢复到初始姿态" << std::endl;
-            enqueueEventRecord("lt_reset", "手柄LT按下，触发回到初始姿态", nullptr, &response);
+            enqueueEventRecord("lt_reset", "手柄LT按下，触发回到初始姿态", nullptr, nullptr, &response);
             inference.reset();
             std::fill(last_action, last_action + ACTION_DIM, 0.0f);
             std::memset(&response, 0, sizeof(response));
@@ -455,6 +538,9 @@ int main(int argc, char** argv) {
                 response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
             }
             moveToInitPose(udp, calibration.init_pose, calibration.offset);
+            if (!calibrateInitEulerBias(udp, calibration.init_pose, calibration.offset, euler_bias)) {
+                std::cerr << "警告: LT恢复后的欧拉角零偏重采失败，保留上一份零偏" << std::endl;
+            }
             continue;
         }
 
@@ -478,6 +564,9 @@ int main(int argc, char** argv) {
             for (int i = 0; i < ACTION_DIM; ++i) {
                 request_for_policy.q[i] = request.q[i] - calibration.offset[i];
             }
+            for (int i = 0; i < 3; ++i) {
+                request_for_policy.eu_ang[i] = request.eu_ang[i] - euler_bias[i];
+            }
 
             bool torque_over_limit = false;
             int torque_over_limit_joint = -1;
@@ -499,6 +588,7 @@ int main(int argc, char** argv) {
                     "] = " + std::to_string(torque_over_limit_value) +
                     " Nm，阈值 = " + std::to_string(kTorqueFeedbackLimitNm) + " Nm",
                     &request,
+                    &request_for_policy,
                     &response);
                 resetToInitPose(
                     "关节力矩超限，joint[" + std::to_string(torque_over_limit_joint) +
@@ -563,6 +653,7 @@ int main(int argc, char** argv) {
                         " rad，阈值 = [" + std::to_string(kJointPosLowerLimits[motor_cmd_over_limit_joint]) +
                         ", " + std::to_string(kJointPosUpperLimits[motor_cmd_over_limit_joint]) + "] rad",
                         &request,
+                        &request_for_policy,
                         &response);
                     resetToInitPose(
                         "最终电机目标位置超限，joint[" + std::to_string(motor_cmd_over_limit_joint) +
@@ -574,7 +665,7 @@ int main(int argc, char** argv) {
                 }
                 infer_count++;
                 CsvLogRecord inference_record = buildRecordFromState(
-                    &request, &response, "inference", "", "");
+                    &request, &request_for_policy, &response, "inference", "", "");
                 last_complete_record = inference_record;
                 has_last_complete_record = true;
                 csv_logger.enqueue(std::move(inference_record));
@@ -622,13 +713,14 @@ int main(int argc, char** argv) {
             } else {
                 // 推理失败、trigger!=1.0或输出有NaN，终止推理并回到初始姿态
                 if (has_nan) {
-                    enqueueEventRecord("nan_output", "推理输出包含NaN，终止推理", &request, &response);
+                    enqueueEventRecord("nan_output", "推理输出包含NaN，终止推理", &request, &request_for_policy, &response);
                     resetToInitPose("推理输出包含NaN，终止推理");
                 } else if (!infer_success) {
                     enqueueEventRecord(
                         "infer_failed",
                         "推理失败或trigger!=1.0，trigger=" + std::to_string(request.trigger),
                         &request,
+                        &request_for_policy,
                         &response);
                     resetToInitPose("推理失败或trigger!=1.0，终止推理");
                 }
@@ -646,7 +738,7 @@ int main(int argc, char** argv) {
     std::cout << "总推理次数: " << infer_count << std::endl;
     std::cout << "========================================" << std::endl;
 
-    enqueueEventRecord("ctrl_c", "收到Ctrl+C或终止信号，准备退出主程序", nullptr, &response);
+    enqueueEventRecord("ctrl_c", "收到Ctrl+C或终止信号，准备退出主程序", nullptr, nullptr, &response);
     csv_logger.stop();
     std::cout << "CSV复盘日志已写入: " << csv_log_path << std::endl;
 
