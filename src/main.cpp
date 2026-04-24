@@ -158,9 +158,9 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10], const float
     bool got_feedback = false;
 
     // ========== 步骤1: 获取当前位置 ==========
-    // 尝试最多50次（约500ms）获取当前关节位置
+    // 尝试最多50次（约500ms）获取当前关节位置。
+    // 在拿到首帧反馈前不发送任何位置命令，避免因默认零值响应导致恢复前冲击。
     for (int i = 0; i < 50 && !got_feedback; i++) {
-        udp.sendResponse(response);
         if (udp.receiveRequest(request)) {
             // 保存当前关节位置
             for (int j = 0; j < 10; j++) {

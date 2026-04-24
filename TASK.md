@@ -32,6 +32,7 @@
 已调整 `calibration_sim_offset.cpp` 的连接阶段逻辑：不再在等待首帧反馈时发送全零位命令；收到第一帧后先回发当前位姿保持，再从当前位姿插值到仿真 `init_pose`，用于降低初始震荡。
 已在主程序中加入 `init_pose` 下的欧拉角零偏补偿：启动时先回到 `init_pose + offset`，在保持阶段连续采样一段时间的 `eu_ang` 求平均，后续推理前先做 `eu_ang_compensated = eu_ang_raw - euler_bias`；任意安全回退到 `init_pose` 后也会重新采样零偏。CSV 日志现同时记录原始欧拉角与补偿后的欧拉角。
 已新增 `tools/plot_deploy_tracking.py`，用于读取单个 `deploy_log_*.csv`，按关节输出 10 张 PNG 跟踪图。每张图包含位置/速度/扭矩三个子图，显示期望值与实际值，并在图上叠加 `event` 行对应的事件时刻。
+已修正 `moveToInitPose()` 的首帧获取逻辑：在拿到当前位置反馈前不再发送默认全零响应，改为先接收首帧关节位置、再开始 5 秒插值回 `init_pose`，用于降低每次恢复前的瞬时冲击。
 
 ## 已完成项
 - 新增 `AGENTS.md`，记录仓库贡献指南、目录结构、构建命令、测试方式和提交要求。
@@ -95,6 +96,7 @@
 - 当前欧拉角零偏补偿是在 `main.cpp` 收到 `request` 后先对 `eu_ang` 做减偏置，再把补偿后的 `request_for_policy` 传给推理；`trt_inference.cpp` 内部并不知道这层部署侧补偿。
 - 欧拉角零偏补偿目前采用“静站窗口内直接求均值”的方式，没有对 `yaw` 做跨 `±pi` 的 unwrap；在 `init_pose` 静站的小窗口内通常没问题，但若后续出现跨边界跳变，需要单独处理。
 - 当前绘图脚本依赖 `pandas + matplotlib`，只保存 PNG，不弹交互窗口；时间轴使用 `timestamp_local` 转换后的相对秒，`event` 行会作为竖线叠加在每个子图上。
+- `moveToInitPose()` 现在在首帧反馈到达前不会主动发控制指令；如果 50 次尝试内仍未收到反馈，才退化为以 `init_pose` 为插值起点继续执行。
 
 ## 风险和约束
 - 该项目依赖 Jetson、CUDA、TensorRT 和部分硬件接口，很多验证步骤无法在无设备环境下完整复现。
