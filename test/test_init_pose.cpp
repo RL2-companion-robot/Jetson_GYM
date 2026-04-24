@@ -126,9 +126,6 @@ int main(int argc, char** argv) {
     bool startup_pos_captured = false;
 
     for (int i = 0; i < 50 && !startup_pos_captured; i++) {
-        sendto(sock, (char*)&response, sizeof(response), 0,
-               (struct sockaddr*)&remote_addr, sizeof(remote_addr));
-
         socklen_t addr_len = sizeof(remote_addr);
         int received = recvfrom(sock, (char*)&request, sizeof(request), 0,
                                 (struct sockaddr*)&remote_addr, &addr_len);
