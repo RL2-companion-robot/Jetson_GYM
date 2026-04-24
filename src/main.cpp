@@ -47,7 +47,7 @@
 volatile bool g_running = true;
 
 constexpr float kActionToPositionScale = 0.25f;
-constexpr float kTorqueFeedbackLimitNm = 4.0f;
+constexpr float kTorqueFeedbackLimitNm = 10.0f;
 constexpr uint64_t kEulerBiasSettleUs = 300000ULL;
 constexpr uint64_t kEulerBiasSampleUs = 1000000ULL;
 constexpr int kEulerBiasMinSamples = 100;

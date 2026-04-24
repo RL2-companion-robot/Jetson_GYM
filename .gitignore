@@ -10,7 +10,7 @@ lib/
 *.obj
 *.a
 *.lib
-*.so
+*.soc
 *.dll
 *.dylib
 

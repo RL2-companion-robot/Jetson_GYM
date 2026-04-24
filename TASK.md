@@ -31,6 +31,7 @@
 已在 `README.md` 的“推荐使用流程”中补充仿真对齐标定的启动示例，明确 `robot_sim_offset_calibration.yaml` 的典型使用路径。
 已调整 `calibration_sim_offset.cpp` 的连接阶段逻辑：不再在等待首帧反馈时发送全零位命令；收到第一帧后先回发当前位姿保持，再从当前位姿插值到仿真 `init_pose`，用于降低初始震荡。
 已在主程序中加入 `init_pose` 下的欧拉角零偏补偿：启动时先回到 `init_pose + offset`，在保持阶段连续采样一段时间的 `eu_ang` 求平均，后续推理前先做 `eu_ang_compensated = eu_ang_raw - euler_bias`；任意安全回退到 `init_pose` 后也会重新采样零偏。CSV 日志现同时记录原始欧拉角与补偿后的欧拉角。
+已新增 `tools/plot_deploy_tracking.py`，用于读取单个 `deploy_log_*.csv`，按关节输出 10 张 PNG 跟踪图。每张图包含位置/速度/扭矩三个子图，显示期望值与实际值，并在图上叠加 `event` 行对应的事件时刻。
 
 ## 已完成项
 - 新增 `AGENTS.md`，记录仓库贡献指南、目录结构、构建命令、测试方式和提交要求。
@@ -59,6 +60,7 @@
 - 已将主程序改为必须显式传入 `--config`，避免因漏传配置而静默退回旧行为。
 - 已为 `calibration_sim_offset.cpp` 增加标定前人工确认、仿真目标姿态限位检查、插值/保持阶段目标限位检查和扭矩超限保护。
 - 已在主程序中加入欧拉角零偏补偿流程：启动后和每次安全回到 `init_pose` 后，都会重新采样 `eu_ang` 偏置；策略输入使用补偿后的欧拉角，CSV 日志同时保留 `raw_roll/pitch/yaw` 与补偿后的 `roll/pitch/yaw`。
+- 已新增部署日志绘图脚本 `tools/plot_deploy_tracking.py`，支持显式传入一个 `deploy_log_*.csv` 文件路径，并输出 10 张按关节拆分的跟踪 PNG。
 
 ## 剩余未完成事项
 - 后续每次实际修改代码、文档、构建配置或运行方式后，更新本文件中的“当前进度 / 已完成项 / 剩余未完成事项 / 风险和约束”。
@@ -92,6 +94,7 @@
 - 主程序虽然推荐 `../robot_manual_calibration.yaml`，但实际上不会替你补默认值；现场必须显式确认使用的是哪一个配置文件。
 - 当前欧拉角零偏补偿是在 `main.cpp` 收到 `request` 后先对 `eu_ang` 做减偏置，再把补偿后的 `request_for_policy` 传给推理；`trt_inference.cpp` 内部并不知道这层部署侧补偿。
 - 欧拉角零偏补偿目前采用“静站窗口内直接求均值”的方式，没有对 `yaw` 做跨 `±pi` 的 unwrap；在 `init_pose` 静站的小窗口内通常没问题，但若后续出现跨边界跳变，需要单独处理。
+- 当前绘图脚本依赖 `pandas + matplotlib`，只保存 PNG，不弹交互窗口；时间轴使用 `timestamp_local` 转换后的相对秒，`event` 行会作为竖线叠加在每个子图上。
 
 ## 风险和约束
 - 该项目依赖 Jetson、CUDA、TensorRT 和部分硬件接口，很多验证步骤无法在无设备环境下完整复现。
