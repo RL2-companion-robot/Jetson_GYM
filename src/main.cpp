@@ -116,7 +116,7 @@ std::string buildCsvLogPath() {
     localtime_r(&now_time, &local_tm);
 
     std::ostringstream oss;
-    oss << "data/deploy_log_" << std::put_time(&local_tm, "%Y-%m-%d_%H-%M-%S") << ".csv";
+    oss << "../data/deploy_log_" << std::put_time(&local_tm, "%Y-%m-%d_%H-%M-%S") << ".csv";
     return oss.str();
 }
 
@@ -392,7 +392,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!ensureDirectoryExists("data")) {
+    if (!ensureDirectoryExists("../data")) {
         return 1;
     }
 

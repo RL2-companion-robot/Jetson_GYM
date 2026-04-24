@@ -147,6 +147,38 @@ def plot_joint(tracking_df: pd.DataFrame, event_df: pd.DataFrame, joint_idx: int
     plt.close(fig)
 
 
+def plot_imu_triplet(
+    tracking_df: pd.DataFrame,
+    event_df: pd.DataFrame,
+    columns,
+    titles,
+    ylabel: str,
+    output_path: Path,
+    fig_title: str,
+):
+    t_sec = tracking_df["t_sec"]
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    fig.suptitle(fig_title, fontsize=14)
+
+    for ax, column, title in zip(axes, columns, titles):
+        values = tracking_df[column]
+        ax.plot(t_sec, values, linewidth=1.4, color="tab:green")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.45)
+
+        y_min = values.min()
+        y_max = values.max()
+        y_anchor = y_max - 0.02 * (y_max - y_min) if y_max > y_min else y_max
+        add_event_lines(ax, event_df, y_anchor)
+
+    axes[-1].set_xlabel("Time since start (s)")
+    fig.tight_layout(rect=[0.0, 0.03, 1.0, 0.97])
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
 def main():
     args = parse_args()
     csv_path = Path(args.csv_path).expanduser().resolve()
@@ -163,6 +195,49 @@ def main():
     for joint_idx, joint_name in enumerate(JOINT_NAMES):
         output_path = outdir / f"joint_{joint_idx}_{joint_name}.png"
         plot_joint(tracking_df, event_df, joint_idx, output_path)
+        print(f"已保存: {output_path}")
+
+    imu_plot_specs = [
+        (
+            ["omega_x", "omega_y", "omega_z"],
+            ["Omega X", "Omega Y", "Omega Z"],
+            "rad/s",
+            outdir / "imu_omega.png",
+            "IMU Angular Velocity",
+        ),
+        (
+            ["acc_x", "acc_y", "acc_z"],
+            ["Acc X", "Acc Y", "Acc Z"],
+            "m/s^2",
+            outdir / "imu_acc.png",
+            "IMU Acceleration",
+        ),
+        (
+            ["raw_roll", "raw_pitch", "raw_yaw"],
+            ["Raw Roll", "Raw Pitch", "Raw Yaw"],
+            "rad",
+            outdir / "imu_euler_raw.png",
+            "IMU Raw Euler Angles",
+        ),
+        (
+            ["roll", "pitch", "yaw"],
+            ["Compensated Roll", "Compensated Pitch", "Compensated Yaw"],
+            "rad",
+            outdir / "imu_euler_compensated.png",
+            "IMU Compensated Euler Angles",
+        ),
+    ]
+
+    for columns, titles, ylabel, output_path, fig_title in imu_plot_specs:
+        plot_imu_triplet(
+            tracking_df=tracking_df,
+            event_df=event_df,
+            columns=columns,
+            titles=titles,
+            ylabel=ylabel,
+            output_path=output_path,
+            fig_title=fig_title,
+        )
         print(f"已保存: {output_path}")
 
     print(f"全部完成，输出目录: {outdir}")

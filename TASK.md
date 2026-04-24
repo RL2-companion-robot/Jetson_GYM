@@ -32,6 +32,7 @@
 已调整 `calibration_sim_offset.cpp` 的连接阶段逻辑：不再在等待首帧反馈时发送全零位命令；收到第一帧后先回发当前位姿保持，再从当前位姿插值到仿真 `init_pose`，用于降低初始震荡。
 已在主程序中加入 `init_pose` 下的欧拉角零偏补偿：启动时先回到 `init_pose + offset`，在保持阶段连续采样一段时间的 `eu_ang` 求平均，后续推理前先做 `eu_ang_compensated = eu_ang_raw - euler_bias`；任意安全回退到 `init_pose` 后也会重新采样零偏。CSV 日志现同时记录原始欧拉角与补偿后的欧拉角。
 已新增 `tools/plot_deploy_tracking.py`，用于读取单个 `deploy_log_*.csv`，按关节输出 10 张 PNG 跟踪图。每张图包含位置/速度/扭矩三个子图，显示期望值与实际值，并在图上叠加 `event` 行对应的事件时刻。
+已将主程序部署日志输出目录从运行目录下的 `data/` 调整为仓库根目录的 `../data/`；当从 `build/` 启动主程序时，CSV 现在会落到 `Jetson_GYM/data/deploy_log_*.csv`。
 已修正 `moveToInitPose()` 的首帧获取逻辑：在拿到当前位置反馈前发送 `dq_exp[0] = -888.0f` 的握手包，通知 ODroid 先锁住当前位置并继续回传状态，首帧反馈到达后才开始 5 秒插值回 `init_pose`。
 已同步修正 `test_init_pose.cpp` 的首帧获取逻辑：在捕获启动姿态前发送 `dq_exp[0] = -888.0f` 的握手包，替代原先会被误解释成位置目标的握手方式。
 已同步修改 `ODroid_Driver/include/core/jetson_interface.hpp`：新增 `-888.0f` 握手模式解释逻辑，ODroid 收到该包时不执行 `q_exp`，而是使用最新反馈位置继续保持，从而把“建立连接/等待首帧反馈”和“开始位置插值”解耦。
@@ -66,6 +67,7 @@
 - 已为 `calibration_sim_offset.cpp` 增加标定前人工确认、仿真目标姿态限位检查、插值/保持阶段目标限位检查和扭矩超限保护。
 - 已在主程序中加入欧拉角零偏补偿流程：启动后和每次安全回到 `init_pose` 后，都会重新采样 `eu_ang` 偏置；策略输入使用补偿后的欧拉角，CSV 日志同时保留 `raw_roll/pitch/yaw` 与补偿后的 `roll/pitch/yaw`。
 - 已新增部署日志绘图脚本 `tools/plot_deploy_tracking.py`，支持显式传入一个 `deploy_log_*.csv` 文件路径，并输出 10 张按关节拆分的跟踪 PNG。
+- 已扩展 `tools/plot_deploy_tracking.py`，除 10 张关节图外，还会额外输出 4 张 IMU 图：角速度、加速度、原始欧拉角、补偿后欧拉角；每张图均包含 3 个子图（x/y/z 或 roll/pitch/yaw）并叠加事件时刻。
 
 ## 剩余未完成事项
 - 后续每次实际修改代码、文档、构建配置或运行方式后，更新本文件中的“当前进度 / 已完成项 / 剩余未完成事项 / 风险和约束”。
@@ -100,6 +102,8 @@
 - 当前欧拉角零偏补偿是在 `main.cpp` 收到 `request` 后先对 `eu_ang` 做减偏置，再把补偿后的 `request_for_policy` 传给推理；`trt_inference.cpp` 内部并不知道这层部署侧补偿。
 - 欧拉角零偏补偿目前采用“静站窗口内直接求均值”的方式，没有对 `yaw` 做跨 `±pi` 的 unwrap；在 `init_pose` 静站的小窗口内通常没问题，但若后续出现跨边界跳变，需要单独处理。
 - 当前绘图脚本依赖 `pandas + matplotlib`，只保存 PNG，不弹交互窗口；时间轴使用 `timestamp_local` 转换后的相对秒，`event` 行会作为竖线叠加在每个子图上。
+- 当前绘图脚本总共会输出 14 张 PNG：10 张关节跟踪图 + 4 张 IMU 图。
+- 主程序部署日志路径当前按 `../data/deploy_log_*.csv` 生成，默认假设你从 `build/` 目录启动主程序；如果从其他工作目录直接运行可执行文件，日志落盘位置会随相对路径一起变化。
 - `moveToInitPose()` 现在在首帧反馈到达前会发送 `dq_exp[0] = -888.0f` 的握手包；ODroid 应将其解释为“锁住当前位置但正常回传状态”，而不是执行新的位置目标。若 50 次尝试内仍未收到反馈，才退化为以 `init_pose` 为插值起点继续执行。
 - `test_init_pose.cpp` 现在与主程序保持一致：获取首帧反馈前发送 `dq_exp[0] = -888.0f` 握手包，而不是默认零响应或 `init_pose + offset` 强位置命令；若超时拿不到反馈，才退化为以 `init_pose` 作为插值起点。
 - 这套 `-888.0f` 握手模式依赖 `ODroid_Driver/include/core/jetson_interface.hpp` 已同步支持；如果下位机恢复到旧代码，Jetson 侧首帧阶段仍可能把握手包误解释成普通位置命令。
