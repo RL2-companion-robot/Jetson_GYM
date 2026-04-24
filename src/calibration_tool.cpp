@@ -35,6 +35,7 @@
 #endif
 
 using namespace std;
+constexpr float kHandshakeModeFlag = -888.0f;
 
 /*
  * ============================================================
@@ -303,6 +304,7 @@ int main(int argc, char** argv) {
     while (!connected && g_running) {
         MsgResponse dummy;
         memset(&dummy, 0, sizeof(dummy));
+        dummy.dq_exp[0] = kHandshakeModeFlag;
         sendto(sock_fd, &dummy, sizeof(dummy), 0, (struct sockaddr*)&remote_addr, addr_len);
 
         char buf[512];

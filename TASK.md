@@ -36,6 +36,7 @@
 已同步修正 `test_init_pose.cpp` 的首帧获取逻辑：在捕获启动姿态前发送 `dq_exp[0] = -888.0f` 的握手包，替代原先会被误解释成位置目标的握手方式。
 已同步修改 `ODroid_Driver/include/core/jetson_interface.hpp`：新增 `-888.0f` 握手模式解释逻辑，ODroid 收到该包时不执行 `q_exp`，而是使用最新反馈位置继续保持，从而把“建立连接/等待首帧反馈”和“开始位置插值”解耦。
 已同步修改 `ODroid_Driver/tests/test_full_loop.cpp`：测试路径也支持 `-888.0f` 握手模式，避免测试程序和真实运行路径对首帧握手包的解释不一致。
+已将 `calibration_tool.cpp`、`calibration_sim_offset.cpp`、`test_motors.cpp`、`test_zero_pose.cpp`、`test_capture_init_pose_observation.cpp` 的首帧连接阶段统一切到 `dq_exp[0] = -888.0f` 握手模式，避免各工具在冷启动时继续使用全零响应或强位置命令作为首包。
 
 ## 已完成项
 - 新增 `AGENTS.md`，记录仓库贡献指南、目录结构、构建命令、测试方式和提交要求。
@@ -103,6 +104,7 @@
 - `test_init_pose.cpp` 现在与主程序保持一致：获取首帧反馈前发送 `dq_exp[0] = -888.0f` 握手包，而不是默认零响应或 `init_pose + offset` 强位置命令；若超时拿不到反馈，才退化为以 `init_pose` 作为插值起点。
 - 这套 `-888.0f` 握手模式依赖 `ODroid_Driver/include/core/jetson_interface.hpp` 已同步支持；如果下位机恢复到旧代码，Jetson 侧首帧阶段仍可能把握手包误解释成普通位置命令。
 - `ODroid_Driver/tests/test_full_loop.cpp` 也已同步支持 `-888.0f` 握手模式；如果只更新主运行路径、不更新测试路径，联调现象会和真实运行不一致。
+- Jetson 侧凡是“先建立 UDP 再进入插值/标定/观测采集”的入口，当前都应优先使用 `-888.0f` 握手模式；如果后续新增类似工具，也应保持这一约定，避免重新引入首包冲击或连接等待问题。
 
 ## 风险和约束
 - 该项目依赖 Jetson、CUDA、TensorRT 和部分硬件接口，很多验证步骤无法在无设备环境下完整复现。

@@ -46,6 +46,7 @@ constexpr float ANG_VEL_SCALE = 0.25f;
 constexpr float SMOOTH = 0.03f;
 constexpr float DEAD_ZONE = 0.01f;
 constexpr int kFlushEveryRows = 100;
+constexpr float kHandshakeModeFlag = -888.0f;
 }
 
 volatile bool g_running = true;
@@ -238,6 +239,7 @@ int main(int argc, char** argv) {
     MsgRequest request;
     MsgResponse response;
     std::memset(&response, 0, sizeof(response));
+    response.dq_exp[0] = kHandshakeModeFlag;
 
     float startup_pos[DOF_NUM] = {0.0f};
     bool startup_pos_captured = false;
@@ -271,6 +273,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "用5秒时间平滑插值到初始姿态..." << std::endl;
+    std::memset(&response, 0, sizeof(response));
     auto interp_start = std::chrono::steady_clock::now();
     while (g_running) {
         auto now = std::chrono::steady_clock::now();

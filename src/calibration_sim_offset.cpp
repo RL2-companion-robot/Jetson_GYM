@@ -34,6 +34,7 @@ constexpr uint64_t kMoveDurationUs = 5000000ULL;
 constexpr uint64_t kSettleDurationUs = 2000000ULL;
 constexpr uint64_t kSampleWindowUs = 1000000ULL;
 constexpr float kTorqueFeedbackLimitNm = 4.0f;
+constexpr float kHandshakeModeFlag = -888.0f;
 
 constexpr float kSimInitPose[DOF_NUM] = {
     0.0f, 0.0f, 0.18f, 1.11f, 0.92f,
@@ -193,10 +194,12 @@ int main(int argc, char** argv) {
     MsgRequest request;
     MsgResponse response;
     memset(&response, 0, sizeof(response));
+    response.dq_exp[0] = kHandshakeModeFlag;
 
     bool connected = false;
     float startup_pos[DOF_NUM] = {0.0f};
     while (!connected && g_running) {
+        sendto(sock_fd, &response, sizeof(response), 0, (struct sockaddr*)&remote_addr, addr_len);
         int received = recvfrom(sock_fd, &request, sizeof(request), 0, (struct sockaddr*)&remote_addr, &addr_len);
         if (received == static_cast<int>(sizeof(MsgRequest))) {
             std::string torque_reason;

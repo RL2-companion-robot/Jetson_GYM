@@ -54,6 +54,7 @@ static_assert(sizeof(MsgRequest) == 58 * sizeof(float), "MsgRequest size must be
 static_assert(sizeof(MsgResponse) == 30 * sizeof(float), "MsgResponse size must be 120 bytes");
 
 volatile bool g_running = true;
+constexpr float kHandshakeModeFlag = -888.0f;
 
 void signal_handler(int sig) {
     cout << "\n收到信号 " << sig << ", 准备退出..." << endl;
@@ -118,6 +119,7 @@ int main(int argc, char** argv) {
     MsgRequest request;
     MsgResponse response;
     memset(&response, 0, sizeof(response));
+    response.dq_exp[0] = kHandshakeModeFlag;
 
     float startup_pos[10] = {0.0f};
     bool startup_pos_captured = false;
@@ -150,6 +152,8 @@ int main(int argc, char** argv) {
     }
 
     cout << "\n正在用5秒时间平滑插值到全零位..." << endl;
+
+    memset(&response, 0, sizeof(response));
 
     struct timeval interp_start_tv;
     gettimeofday(&interp_start_tv, NULL);

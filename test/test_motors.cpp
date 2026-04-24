@@ -36,6 +36,7 @@ using namespace std;
 
 /// 运行标志
 volatile bool g_running = true;
+constexpr float kHandshakeModeFlag = -888.0f;
 
 /**
  * @brief 信号处理函数
@@ -211,6 +212,7 @@ int main(int argc, char** argv) {
     MsgRequest request;
     MsgResponse response;
     memset(&response, 0, sizeof(response));
+    response.dq_exp[0] = kHandshakeModeFlag;
 
     socklen_t addr_len = sizeof(remote_addr);
     bool connected = false;
@@ -232,6 +234,12 @@ int main(int argc, char** argv) {
     // ========== 主循环 ==========
     while (g_running) {
         char buf[512];
+
+        if (!connected) {
+            memcpy(buf, &response, sizeof(response));
+            sendto(sock_fd, buf, sizeof(response), 0,
+                  (struct sockaddr*)&remote_addr, addr_len);
+        }
 
         // 接收ODroid数据
         int n = recvfrom(sock_fd, buf, sizeof(buf), 0,
