@@ -32,8 +32,10 @@
 已调整 `calibration_sim_offset.cpp` 的连接阶段逻辑：不再在等待首帧反馈时发送全零位命令；收到第一帧后先回发当前位姿保持，再从当前位姿插值到仿真 `init_pose`，用于降低初始震荡。
 已在主程序中加入 `init_pose` 下的欧拉角零偏补偿：启动时先回到 `init_pose + offset`，在保持阶段连续采样一段时间的 `eu_ang` 求平均，后续推理前先做 `eu_ang_compensated = eu_ang_raw - euler_bias`；任意安全回退到 `init_pose` 后也会重新采样零偏。CSV 日志现同时记录原始欧拉角与补偿后的欧拉角。
 已新增 `tools/plot_deploy_tracking.py`，用于读取单个 `deploy_log_*.csv`，按关节输出 10 张 PNG 跟踪图。每张图包含位置/速度/扭矩三个子图，显示期望值与实际值，并在图上叠加 `event` 行对应的事件时刻。
-已修正 `moveToInitPose()` 的首帧获取逻辑：在拿到当前位置反馈前不再发送默认全零响应，改为发送安全握手包 `init_pose + offset`，既避免恢复前的零位冲击，也保留 ODroid 侧依赖首包建立通信节奏的行为。
-已同步修正 `test_init_pose.cpp` 的首帧获取逻辑：在捕获启动姿态前发送 `init_pose + offset` 作为安全握手包，替代原先的全零响应。
+已修正 `moveToInitPose()` 的首帧获取逻辑：在拿到当前位置反馈前发送 `dq_exp[0] = -888.0f` 的握手包，通知 ODroid 先锁住当前位置并继续回传状态，首帧反馈到达后才开始 5 秒插值回 `init_pose`。
+已同步修正 `test_init_pose.cpp` 的首帧获取逻辑：在捕获启动姿态前发送 `dq_exp[0] = -888.0f` 的握手包，替代原先会被误解释成位置目标的握手方式。
+已同步修改 `ODroid_Driver/include/core/jetson_interface.hpp`：新增 `-888.0f` 握手模式解释逻辑，ODroid 收到该包时不执行 `q_exp`，而是使用最新反馈位置继续保持，从而把“建立连接/等待首帧反馈”和“开始位置插值”解耦。
+已同步修改 `ODroid_Driver/tests/test_full_loop.cpp`：测试路径也支持 `-888.0f` 握手模式，避免测试程序和真实运行路径对首帧握手包的解释不一致。
 
 ## 已完成项
 - 新增 `AGENTS.md`，记录仓库贡献指南、目录结构、构建命令、测试方式和提交要求。
@@ -97,8 +99,10 @@
 - 当前欧拉角零偏补偿是在 `main.cpp` 收到 `request` 后先对 `eu_ang` 做减偏置，再把补偿后的 `request_for_policy` 传给推理；`trt_inference.cpp` 内部并不知道这层部署侧补偿。
 - 欧拉角零偏补偿目前采用“静站窗口内直接求均值”的方式，没有对 `yaw` 做跨 `±pi` 的 unwrap；在 `init_pose` 静站的小窗口内通常没问题，但若后续出现跨边界跳变，需要单独处理。
 - 当前绘图脚本依赖 `pandas + matplotlib`，只保存 PNG，不弹交互窗口；时间轴使用 `timestamp_local` 转换后的相对秒，`event` 行会作为竖线叠加在每个子图上。
-- `moveToInitPose()` 现在在首帧反馈到达前会发送 `init_pose + offset` 作为安全握手包；如果 50 次尝试内仍未收到反馈，才退化为以 `init_pose` 为插值起点继续执行。
-- `test_init_pose.cpp` 现在与主程序保持一致：获取首帧反馈前发送 `init_pose + offset` 作为安全握手包，而不是默认零响应；若超时拿不到反馈，才退化为以 `init_pose` 作为插值起点。
+- `moveToInitPose()` 现在在首帧反馈到达前会发送 `dq_exp[0] = -888.0f` 的握手包；ODroid 应将其解释为“锁住当前位置但正常回传状态”，而不是执行新的位置目标。若 50 次尝试内仍未收到反馈，才退化为以 `init_pose` 为插值起点继续执行。
+- `test_init_pose.cpp` 现在与主程序保持一致：获取首帧反馈前发送 `dq_exp[0] = -888.0f` 握手包，而不是默认零响应或 `init_pose + offset` 强位置命令；若超时拿不到反馈，才退化为以 `init_pose` 作为插值起点。
+- 这套 `-888.0f` 握手模式依赖 `ODroid_Driver/include/core/jetson_interface.hpp` 已同步支持；如果下位机恢复到旧代码，Jetson 侧首帧阶段仍可能把握手包误解释成普通位置命令。
+- `ODroid_Driver/tests/test_full_loop.cpp` 也已同步支持 `-888.0f` 握手模式；如果只更新主运行路径、不更新测试路径，联调现象会和真实运行不一致。
 
 ## 风险和约束
 - 该项目依赖 Jetson、CUDA、TensorRT 和部分硬件接口，很多验证步骤无法在无设备环境下完整复现。

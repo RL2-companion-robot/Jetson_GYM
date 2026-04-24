@@ -30,6 +30,7 @@
 using namespace std;
 
 volatile bool g_running = true;
+constexpr float kHandshakeModeFlag = -888.0f;
 
 void signal_handler(int sig) {
     cout << "\n收到信号 " << sig << ", 准备退出..." << endl;
@@ -120,11 +121,7 @@ int main(int argc, char** argv) {
     MsgRequest request;
     MsgResponse response;
     memset(&response, 0, sizeof(response));
-    for (int i = 0; i < 10; ++i) {
-        response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
-        response.dq_exp[i] = 0.0f;
-        response.tau_exp[i] = 0.0f;
-    }
+    response.dq_exp[0] = kHandshakeModeFlag;
 
     // 获取当前位置，作为插值起点
     float startup_pos[10] = {0.0f};
@@ -158,6 +155,8 @@ int main(int argc, char** argv) {
     }
 
     cout << "\n正在用5秒时间平滑插值到初始姿态..." << endl;
+
+    memset(&response, 0, sizeof(response));
 
     // 固定5秒线性插值移动
     struct timeval interp_start_tv;

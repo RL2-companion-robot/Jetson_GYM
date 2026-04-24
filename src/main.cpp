@@ -48,6 +48,7 @@ volatile bool g_running = true;
 
 constexpr float kActionToPositionScale = 0.25f;
 constexpr float kTorqueFeedbackLimitNm = 10.0f;
+constexpr float kHandshakeModeFlag = -888.0f;
 constexpr uint64_t kEulerBiasSettleUs = 300000ULL;
 constexpr uint64_t kEulerBiasSampleUs = 1000000ULL;
 constexpr int kEulerBiasMinSamples = 100;
@@ -152,11 +153,7 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10], const float
     MsgRequest request;
     MsgResponse response;
     std::memset(&response, 0, sizeof(response));
-    for (int i = 0; i < 10; ++i) {
-        response.q_exp[i] = init_pos[i] + offset[i];
-        response.dq_exp[i] = 0.0f;
-        response.tau_exp[i] = 0.0f;
-    }
+    response.dq_exp[0] = kHandshakeModeFlag;
 
     // 当前位置（从反馈获取）
     float current_pos[10] = {0};
@@ -164,8 +161,8 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10], const float
 
     // ========== 步骤1: 获取当前位置 ==========
     // 尝试最多50次（约500ms）获取当前关节位置。
-    // 在拿到首帧反馈前发送安全握手包（init_pose + offset），既避免零位冲击，
-    // 也保留 ODroid 侧依赖首包建立通信节奏的行为。
+    // 在拿到首帧反馈前发送握手包，通知 ODroid 先锁住当前位置并继续回传状态，
+    // 避免把握手阶段误解释成强位置命令。
     for (int i = 0; i < 50 && !got_feedback; i++) {
         udp.sendResponse(response);
         if (udp.receiveRequest(request)) {
@@ -186,6 +183,8 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10], const float
     }
 
     std::cout << "用5秒时间平滑插值到初始姿态..." << std::endl;
+
+    std::memset(&response, 0, sizeof(response));
 
     // ========== 步骤2: 固定5秒线性插值移动 ==========
     auto interp_start = std::chrono::steady_clock::now();
