@@ -1,0 +1,39 @@
+# 双足机器人标定数据
+# 生成时间: Apr 15 2026 17:45:13
+# 单位: 弧度 (rad)
+# init_pose: 网络/策略坐标系下的初始姿态
+# offset: 编码器坐标系到网络坐标系的补偿量，满足 q_obs = q_raw - offset, q_cmd = q_policy + offset
+
+robot_config:
+  init_pose:
+    left_leg:
+      yaw:   0.007820  # rad
+      roll:  -0.001717  # rad
+      pitch: 0.182536  # rad
+      knee:  1.104181  # rad
+      ankle: 0.913443  # rad
+    right_leg:
+      yaw:   0.015831  # rad
+      roll:  0.016594  # rad
+      pitch: -0.178722  # rad
+      knee:  -1.116388  # rad
+      ankle: -0.910010  # rad
+
+  offset:
+    left_leg:
+      yaw:   0.000000  # rad
+      roll:  0.000000  # rad
+      pitch: 0.000000  # rad
+      knee:  0.000000  # rad
+      ankle: 0.000000  # rad
+    right_leg:
+      yaw:   0.000000  # rad
+      roll:  0.000000  # rad
+      pitch: 0.000000  # rad
+      knee:  0.000000  # rad
+      ankle: 0.000000  # rad
+
+  # 说明:
+  # - 此文件由标定工具生成
+  # - 旧手动标定模式会将 offset 写为 0
+  # - 新仿真对齐标定模式会写入非零 offset
