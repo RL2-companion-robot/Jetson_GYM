@@ -120,12 +120,20 @@ int main(int argc, char** argv) {
     MsgRequest request;
     MsgResponse response;
     memset(&response, 0, sizeof(response));
+    for (int i = 0; i < 10; ++i) {
+        response.q_exp[i] = calibration.init_pose[i] + calibration.offset[i];
+        response.dq_exp[i] = 0.0f;
+        response.tau_exp[i] = 0.0f;
+    }
 
     // 获取当前位置，作为插值起点
     float startup_pos[10] = {0.0f};
     bool startup_pos_captured = false;
 
     for (int i = 0; i < 50 && !startup_pos_captured; i++) {
+        sendto(sock, (char*)&response, sizeof(response), 0,
+               (struct sockaddr*)&remote_addr, sizeof(remote_addr));
+
         socklen_t addr_len = sizeof(remote_addr);
         int received = recvfrom(sock, (char*)&request, sizeof(request), 0,
                                 (struct sockaddr*)&remote_addr, &addr_len);

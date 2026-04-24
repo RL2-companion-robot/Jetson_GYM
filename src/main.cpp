@@ -152,6 +152,11 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10], const float
     MsgRequest request;
     MsgResponse response;
     std::memset(&response, 0, sizeof(response));
+    for (int i = 0; i < 10; ++i) {
+        response.q_exp[i] = init_pos[i] + offset[i];
+        response.dq_exp[i] = 0.0f;
+        response.tau_exp[i] = 0.0f;
+    }
 
     // 当前位置（从反馈获取）
     float current_pos[10] = {0};
@@ -159,8 +164,10 @@ void moveToInitPose(UDPCommunication& udp, const float init_pos[10], const float
 
     // ========== 步骤1: 获取当前位置 ==========
     // 尝试最多50次（约500ms）获取当前关节位置。
-    // 在拿到首帧反馈前不发送任何位置命令，避免因默认零值响应导致恢复前冲击。
+    // 在拿到首帧反馈前发送安全握手包（init_pose + offset），既避免零位冲击，
+    // 也保留 ODroid 侧依赖首包建立通信节奏的行为。
     for (int i = 0; i < 50 && !got_feedback; i++) {
+        udp.sendResponse(response);
         if (udp.receiveRequest(request)) {
             // 保存当前关节位置
             for (int j = 0; j < 10; j++) {
